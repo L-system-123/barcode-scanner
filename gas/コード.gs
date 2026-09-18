@@ -62,6 +62,7 @@ function doPost(e) {
       case 'master': return reply(withUser(req, function () { return { ok: true, master: readMaster() }; }));
       case 'commit': return reply(withUser(req, function (user) { return commit(req, user); }));
       case 'today':  return reply(withUser(req, function (user) { return today(req, user); }));
+      case 'find':   return reply(withUser(req, function () { return find(req); }));
       default:       return reply({ ok: false, error: 'bad_action' });
     }
   } catch (err) {
@@ -330,6 +331,24 @@ function commit(req, user) {
    スキャン記録は確定順に下へ追記されるので、今日の分は必ず末尾にまとまっている。
    シート全体は読まず、末尾から最大 TODAY_MAX_ROWS 行だけ見る */
 var TODAY_MAX_ROWS = 5000;
+
+/* ===== 管理番号から探す =====
+   過去の分も含めて、スキャン記録の C列 を完全一致で探す。
+   同じ番号が何度も出ることはまず無いが、念のため新しい方から最大20件 */
+function find(req) {
+  var code = String(req.code || '');
+  if (!/^\d{12}$/.test(code)) return { ok: false, error: 'bad_code' };
+  var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_LOG);
+  var last = sh.getLastRow();
+  if (last < 2) return { ok: true, hits: [] };
+  var cells = sh.getRange(2, 3, last - 1, 1).createTextFinder(code).matchEntireCell(true).findAll();
+  var hits = cells.slice(-20).reverse().map(function (c) {
+    var r = sh.getRange(c.getRow(), 1, 1, LOG_HEADER.length).getValues()[0];
+    return { pallet: String(r[0]), carrier: String(r[1]), cd: String(r[4]), user: String(r[5]),
+             at: r[3] instanceof Date ? r[3].getTime() : null };
+  });
+  return { ok: true, hits: hits };
+}
 
 function today(req, user) {
   var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_LOG);

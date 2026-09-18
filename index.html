@@ -353,6 +353,24 @@
   /* 判定は長くなることがあるので折り返す。時刻の列が画面の外に押し出されないように */
   #log td:nth-child(2) { white-space: normal; }
   #log td:nth-child(3) { color: var(--ink-2); font-size: 12px; }
+  #log td:nth-child(4) { padding: 3px 0 3px 4px; text-align: right; }
+  .rm { min-height: 32px; padding: 2px 11px; font-size: 14px; color: var(--ink-2); }
+  #log tr.removed td { opacity: .45; }
+  #log tr.removed td.c { text-decoration: line-through; }
+
+  /* ---- 管理番号を探す ---- */
+  #findCam { width: 100%; margin-top: 8px; }
+  #findCam.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+  #findResult { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+  #findResult:empty { display: none; }
+  .hit {
+    border: 1px solid var(--line); border-left: 5px solid var(--c, var(--line));
+    border-radius: 8px; padding: 8px 12px; font-size: 13.5px;
+  }
+  .hit b { display: block; font-family: "JetBrains Mono", monospace; font-size: 14.5px; }
+  .hit span { color: var(--ink-2); font-size: 12.5px; }
+  .hit.none { border-left-color: var(--ink-2); color: var(--ink-2); }
+  .hit.local { border-left-color: #f0b300; }
   tr.sample td { color: var(--ink-2); font-style: italic; }
   .chip { font-weight: 700; color: var(--c, var(--ink-2)); filter: var(--chip-fx); }
 
@@ -482,11 +500,21 @@
   </section>
 
   <section class="card">
+    <h2>管理番号を探す</h2>
+    <div class="manual">
+      <input type="text" id="findInput" placeholder="12桁の管理番号" inputmode="numeric">
+      <button id="findBtn">探す</button>
+    </div>
+    <button id="findCam">カメラで探す</button>
+    <div id="findResult"></div>
+  </section>
+
+  <section class="card">
     <h2>このパレットの読取ログ</h2>
     <div class="scroll">
       <table>
         <thead>
-          <tr><th>管理番号</th><th>判定</th><th>時刻</th></tr>
+          <tr><th>管理番号</th><th>判定</th><th>時刻</th><th></th></tr>
         </thead>
         <tbody id="log"></tbody>
       </table>
@@ -1177,6 +1205,18 @@ function handle(raw, decodeMs, format, skipFilter) {
   /* 同じコードの連打を1.5秒間は無視する。実運用では必須 */
   if (raw === lastCode && now - lastCodeAt < 1500) return;
 
+  /* 「カメラで探す」の後の1箱は、パレットに数えずに探すだけ。
+     そのままカメラを向けていても二重に数えないよう、見続けている番号として扱う */
+  if (findNext) {
+    var fc = normCode(raw);
+    if (!fc.code) return;
+    setFindCam(false);
+    lastCode = raw; lastCodeAt = now;
+    currentCode = fc.code; seenAt[fc.code] = Date.now();
+    doFind(fc.code, true);
+    return;
+  }
+
   /* 枠がずれて別のバーコードを拾った場合はここで止める。
      黙って無視すると「壊れてる」のか「弾いた」のか分からないので、理由を出す */
   var chk = skipFilter ? { ok: true, digits: String(raw) } : accepted(raw);
@@ -1211,7 +1251,7 @@ function handle(raw, decodeMs, format, skipFilter) {
   $('mGap').textContent = gap ? (gap / 1000).toFixed(2) : '—';
 
   /* --- パレット照合 --- */
-  var verdict, vcolor;
+  var verdict, vcolor, added = false;
 
   if (pallet.seen[code]) {
     /* 二度読み。積付けミスの兆候なので止める */
@@ -1232,6 +1272,7 @@ function handle(raw, decodeMs, format, skipFilter) {
     $('pCarrier').style.color = band.color || '';
     if (band.color) $('palletCard').style.setProperty('--pc', band.color);
     $('pCount').textContent = pallet.count;
+    added = true;
     if (shouldSound(code)) beep();
 
   } else if (band.name !== pallet.carrier.name) {
@@ -1248,6 +1289,7 @@ function handle(raw, decodeMs, format, skipFilter) {
     verdict = band.name;
     vcolor = band.color;
     $('pCount').textContent = pallet.count;
+    added = true;
     if (shouldSound(code)) beep();
   }
 
@@ -1261,9 +1303,130 @@ function handle(raw, decodeMs, format, skipFilter) {
   row.innerHTML =
     '<td class="c">' + code + '</td>' +
     '<td><span class="chip" style="--c:' + (vcolor || 'var(--ink-2)') + '">' + verdict + '</span></td>' +
-    '<td>' + ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2) + ':' + ('0' + t.getSeconds()).slice(-2) + '</td>';
+    '<td>' + ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2) + ':' + ('0' + t.getSeconds()).slice(-2) + '</td>' +
+    '<td></td>';
+  if (added) {
+    var rm = document.createElement('button');
+    rm.className = 'rm';
+    rm.textContent = '×';
+    rm.setAttribute('aria-label', code + ' を取り消す');
+    rm.onclick = function () { removeCarton(code, row); };
+    row.lastChild.appendChild(rm);
+  }
   $('log').prepend(row);
   while ($('log').children.length > 60) $('log').lastChild.remove();
+}
+
+/* ===== 1箱だけ取り消す =====
+   確定前のパレットから、その1箱だけ外す。外した箱はもう一度読めば数え直せる。
+   全部外したら運送会社も未決定に戻す */
+function removeCarton(code, row) {
+  if (!pallet.seen[code]) return;
+  if (!confirm(code + ' をこのパレットから外しますか？')) return;
+  delete pallet.seen[code];
+  pallet.items = pallet.items.filter(function (it) { return it.code !== code; });
+  pallet.count = pallet.items.length;
+  $('pCount').textContent = pallet.count;
+
+  row.classList.add('removed');
+  row.lastChild.innerHTML = '';
+  var chip = row.querySelector('.chip');
+  if (chip) { chip.textContent = '取り消し'; chip.style.setProperty('--c', 'var(--ink-2)'); }
+
+  /* 同じ箱をすぐ読み直せるよう、「見続けている番号」の扱いを解く */
+  if (currentCode === code) currentCode = '';
+  delete seenAt[code]; delete soundAt[code];
+  lastCode = ''; pending = ''; pendingN = 0;
+
+  if (!pallet.count) {
+    pallet.carrier = null;
+    $('pCarrier').textContent = '—';
+    $('pCarrier').style.color = '';
+    $('palletCard').style.removeProperty('--pc');
+    $('commitPallet').disabled = true;
+  }
+}
+
+/* ===== 管理番号を探す =====
+   シートの スキャン記録 を過去分も含めて探す。
+   積んでいる途中のパレット・未送信のパレットはシートに無いので、端末の中も見る */
+var findNext = false;
+function setFindCam(on) {
+  findNext = on;
+  $('findCam').classList.toggle('on', on);
+  $('findCam').textContent = on ? '次に読んだ箱を探します（押すと取りやめ）' : 'カメラで探す';
+}
+$('findCam').onclick = function () {
+  armAudio();
+  if (findNext) { setFindCam(false); return; }
+  setFindCam(true);
+  if (!running) start();
+  stage.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+$('findBtn').onclick = function () {
+  var nc = normCode($('findInput').value);
+  if (!nc.code) { showFind([{ none: true, text: '12桁の管理番号を入れてください' }]); return; }
+  $('findInput').value = '';
+  doFind(nc.code, false);
+};
+$('findInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('findBtn').click(); });
+
+function stamp(ms) {
+  if (!ms) return '';
+  var t = new Date(ms);
+  return ('0' + (t.getMonth() + 1)).slice(-2) + '/' + ('0' + t.getDate()).slice(-2) + ' ' + hhmm(ms);
+}
+
+function doFind(code, fromCam) {
+  var local = [];
+  if (pallet.seen[code]) {
+    local.push({ local: true, title: '積んでいる途中のパレット（未確定）', text: pallet.carrier ? pallet.carrier.name : '' });
+  }
+  outbox.forEach(function (o) {
+    if (o.items.some(function (it) { return it.code === code; })) {
+      local.push({ local: true, title: '未送信のパレット', text: o.name });
+    }
+  });
+  showFind(local.concat([{ none: true, text: code + ' を探しています…' }]));
+  if (fromCam) {
+    $('code').textContent = code;
+    $('band').textContent = '探しています…';
+    $('band').style.color = 'var(--ink-2)';
+  }
+
+  api({ action: 'find', token: lsGet(KEY.token), code: code }).then(function (r) {
+    if (!r.ok) {
+      if (r.error === 'auth') { lsSet(KEY.token, null); showLogin('ログインの期限が切れました'); return; }
+      showFind(local.concat([{ none: true, text: '探せませんでした（' + r.error + '）' }]));
+      return;
+    }
+    var hits = r.hits.map(function (h) {
+      return { title: h.pallet, text: [h.carrier, stamp(h.at), h.user].filter(Boolean).join(' ・ '), color: colorOf(h) };
+    });
+    var all = local.concat(hits);
+    if (!all.length) all = [{ none: true, text: code + ' はまだどのパレットにも積まれていません' }];
+    else all.unshift({ none: true, text: code + ' の結果' });
+    showFind(all);
+    if (fromCam) {
+      $('band').textContent = hits.length ? '→ ' + hits[0].title : (local.length ? '→ ' + local[0].title : 'どのパレットにも無い');
+    }
+  }).catch(function () {
+    showFind(local.concat([{ none: true, text: '探せませんでした。電波を確認してください' }]));
+  });
+}
+
+/* 結果はシートから来る文字なので textContent で入れる */
+function showFind(list) {
+  var host = $('findResult');
+  host.innerHTML = '';
+  list.forEach(function (h) {
+    var d = document.createElement('div');
+    d.className = 'hit' + (h.none ? ' none' : '') + (h.local ? ' local' : '');
+    if (h.color) d.style.setProperty('--c', h.color);
+    if (h.title) { var b = document.createElement('b'); b.textContent = h.title; d.appendChild(b); }
+    var sp = document.createElement('span'); sp.textContent = h.text || ''; d.appendChild(sp);
+    host.appendChild(d);
+  });
 }
 
 $('start').onclick = start;
