@@ -21,6 +21,7 @@
     --line:    #d2d9df;
     --signal:  #d03a3a;
     --ok:      #1a8a5c;
+    --accent:  #2459c7;
     --shadow:  0 1px 2px rgba(21,26,31,.08), 0 6px 18px rgba(21,26,31,.06);
     --chip-fx: none;
   }
@@ -33,6 +34,7 @@
       --line:   #28313a;
       --signal: #ff5c5c;
       --ok:     #3ec089;
+      --accent: #4d86f0;
       --shadow: 0 1px 2px rgba(0,0,0,.5), 0 6px 18px rgba(0,0,0,.35);
       --chip-fx: brightness(1.35) saturate(.9);
     }
@@ -45,6 +47,7 @@
     --line:   #28313a;
     --signal: #ff5c5c;
     --ok:     #3ec089;
+    --accent: #4d86f0;
     --shadow: 0 1px 2px rgba(0,0,0,.5), 0 6px 18px rgba(0,0,0,.35);
     --chip-fx: brightness(1.35) saturate(.9);
   }
@@ -79,10 +82,11 @@
   .eyebrow { font-size: 12px; }
   .label   { font-size: 11px; }
 
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   h1 {
-    font-family: "Barlow Semi Condensed", "Hiragino Kaku Gothic ProN", sans-serif;
-    font-size: 30px; font-weight: 600; line-height: 1.15;
-    margin: 2px 0 0; text-wrap: balance;
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", sans-serif;
+    font-size: 20px; font-weight: 700; line-height: 1.3;
+    margin: 0; text-wrap: balance;
   }
   h2 {
     font-family: "Barlow Semi Condensed", "Hiragino Kaku Gothic ProN", sans-serif;
@@ -118,9 +122,11 @@
   /* ---- パレット ---- */
   .pallet {
     display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
-    padding: 12px 14px; box-shadow: var(--shadow);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    border-left: 6px solid var(--pc, var(--line));
+    padding: 14px 16px; box-shadow: var(--shadow);
   }
+  #pCount { font-size: 36px; }
   .pcol { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .pcol.pnum { margin-left: auto; text-align: right; }
   .pv {
@@ -141,11 +147,32 @@
      仕分け表はログインしてから Apps Script に取りに行く。
      このページ自体は公開なので、社名や表はここに書かない */
   .who {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: center; gap: 10px; margin-left: auto;
     font-size: 13px; color: var(--ink-2);
   }
   .who b { font-family: "JetBrains Mono", monospace; color: var(--ink); }
-  .who button { margin-left: auto; font-size: 12.5px; padding: 5px 12px; }
+  .who button { font-size: 12.5px; padding: 5px 12px; min-height: 34px; }
+
+  /* ---- カード ---- */
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 16px; box-shadow: var(--shadow);
+  }
+  .card h2 { font-size: 14px; margin-bottom: 10px; }
+  .empty { color: var(--ink-2); font-size: 13px; text-align: center; padding: 10px 0 4px; }
+  .scroll:has(#log:not(:empty)) + .empty { display: none; }
+
+  /* ---- 詳細（管理者向け）。普段は閉じておく ---- */
+  details.diag { padding: 0; }
+  details.diag > summary {
+    cursor: pointer; list-style: none; padding: 13px 16px;
+    font-size: 13px; color: var(--ink-2); font-weight: 600;
+  }
+  details.diag > summary::-webkit-details-marker { display: none; }
+  details.diag > summary::before { content: "▸ "; }
+  details.diag[open] > summary::before { content: "▾ "; }
+  .diagbody { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 14px; }
+  .diagbody h3 { font-size: 12.5px; margin: 4px 0 6px; color: var(--ink-2); }
   .login {
     position: fixed; inset: 0; z-index: 40; background: var(--paper);
     display: grid; place-items: center; padding: 24px 16px;
@@ -246,7 +273,9 @@
     border-radius: 7px; border: 1px solid var(--line);
     background: var(--panel); color: var(--ink); cursor: pointer;
   }
-  button.go { background: var(--signal); border-color: var(--signal); color: #fff; font-weight: 700; }
+  button { min-height: 46px; }
+  button.go { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+  #start { flex: 1 1 auto; }
   button[disabled] { opacity: .45; cursor: default; }
   button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
   .engine {
@@ -256,8 +285,8 @@
 
   /* ---- 読取結果 ---- */
   .readout {
-    background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--line);
-    border-radius: 8px; padding: 14px 16px; box-shadow: var(--shadow);
+    background: var(--panel); border: 1px solid var(--line); border-left: 6px solid var(--line);
+    border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow);
   }
   #code {
     font-family: "JetBrains Mono", monospace; font-size: 26px; font-weight: 700;
@@ -290,6 +319,9 @@
     font-variant-numeric: tabular-nums;
   }
   td.c { font-family: "JetBrains Mono", monospace; }
+  /* 判定は長くなることがあるので折り返す。時刻の列が画面の外に押し出されないように */
+  #log td:nth-child(2) { white-space: normal; }
+  #log td:nth-child(3) { color: var(--ink-2); font-size: 12px; }
   tr.sample td { color: var(--ink-2); font-style: italic; }
   .chip { font-weight: 700; color: var(--c, var(--ink-2)); filter: var(--chip-fx); }
 
@@ -331,12 +363,11 @@
 
   <header>
     <h1>パレット積み付けスキャン</h1>
+    <div class="who" id="who" hidden>
+      <span><b id="whoId">—</b></span>
+      <button id="logout">ログアウト</button>
+    </div>
   </header>
-
-  <div class="who" id="who" hidden>
-    <span>ユーザー <b id="whoId">—</b></span>
-    <button id="logout">ログアウト</button>
-  </div>
 
   <div class="stage" id="stage">
     <video id="v" playsinline muted></video>
@@ -349,7 +380,6 @@
     <button id="start" class="go">開始</button>
     <button id="stop" disabled>停止</button>
     <button id="torch" hidden>ライト</button>
-    <span class="engine" id="engine">engine: —</span>
   </div>
 
   <div class="zoomwrap" id="zoomwrap" hidden>
@@ -358,13 +388,13 @@
     <span id="zoomV">1.0×</span>
   </div>
 
-  <div class="pallet">
+  <div class="pallet" id="palletCard">
     <div class="pcol">
       <span class="label">このパレットの運送会社</span>
       <span class="pv" id="pCarrier">—</span>
     </div>
     <div class="pcol pnum">
-      <span class="label">読取</span>
+      <span class="label">件数</span>
       <span class="pv" id="pCount">0</span>
     </div>
     <div class="pbtns">
@@ -375,28 +405,9 @@
   </div>
 
   <div class="readout" id="readout">
-    <div class="label">読取コード</div>
+    <div class="label">最後に読んだ管理番号</div>
     <div id="code">—</div>
     <div id="band">待機中</div>
-    <div id="fmt" class="label">種別 —</div>
-  </div>
-
-  <div class="meters">
-    <div class="meter">
-      <span class="label">デコード</span>
-      <span class="v" id="mDecode">—</span>
-      <span class="u">ms / frame</span>
-    </div>
-    <div class="meter">
-      <span class="label">レート</span>
-      <span class="v" id="mFps">—</span>
-      <span class="u">fps</span>
-    </div>
-    <div class="meter">
-      <span class="label">読取間隔</span>
-      <span class="v" id="mGap">—</span>
-      <span class="u">秒 / 件</span>
-    </div>
   </div>
 
   <div class="alert" id="alert" hidden>
@@ -431,30 +442,59 @@
     <p id="faultHint"></p>
   </div>
 
-  <section>
+  <section class="card">
     <h2>管理番号を手入力する</h2>
     <div class="manual">
-      <input type="text" id="manual" placeholder="例 4901234567894" inputmode="numeric">
+      <input type="text" id="manual" placeholder="12桁の管理番号" inputmode="numeric">
       <button id="manualBtn">確定</button>
     </div>
   </section>
 
-  <section>
-    <h2>読取ログ</h2>
+  <section class="card">
+    <h2>このパレットの読取ログ</h2>
     <div class="scroll">
       <table>
         <thead>
-          <tr><th>コード</th><th>帯域</th><th>デコード</th><th>間隔</th></tr>
+          <tr><th>管理番号</th><th>判定</th><th>時刻</th></tr>
         </thead>
         <tbody id="log"></tbody>
       </table>
     </div>
+    <div class="empty">まだ読み取っていません</div>
   </section>
 
-  <section>
-    <h2>帯域の割り当て</h2>
-    <div class="bands" id="bandlist"></div>
-  </section>
+  <!-- 現場の作業には要らない情報。調子が悪い時の確認用に折りたたんで残す -->
+  <details class="card diag">
+    <summary>詳細（管理者向け）</summary>
+    <div class="diagbody">
+      <div>
+        <h3>読み取り性能</h3>
+        <div class="meters">
+          <div class="meter">
+            <span class="label">デコード</span>
+            <span class="v" id="mDecode">—</span>
+            <span class="u">ms / frame</span>
+          </div>
+          <div class="meter">
+            <span class="label">レート</span>
+            <span class="v" id="mFps">—</span>
+            <span class="u">fps</span>
+          </div>
+          <div class="meter">
+            <span class="label">読取間隔</span>
+            <span class="v" id="mGap">—</span>
+            <span class="u">秒 / 件</span>
+          </div>
+        </div>
+        <div class="engine" id="engine" style="margin-top:8px">engine: —</div>
+        <div id="fmt" class="label" style="margin-top:4px">種別 —</div>
+      </div>
+      <div>
+        <h3>仕分け先一覧</h3>
+        <div class="bands" id="bandlist"></div>
+      </div>
+    </div>
+  </details>
 
 </div>
 
@@ -804,6 +844,7 @@ function resetPallet() {
   clearAlert();
   $('pCarrier').textContent = '—';
   $('pCarrier').style.color = '';
+  $('palletCard').style.removeProperty('--pc');
   $('pCount').textContent = '0';
   $('log').innerHTML = '';
   cleared = true;
@@ -1146,6 +1187,7 @@ function handle(raw, decodeMs, format, skipFilter) {
     vcolor = band.color;
     $('pCarrier').textContent = band.name;
     $('pCarrier').style.color = band.color || '';
+    if (band.color) $('palletCard').style.setProperty('--pc', band.color);
     $('pCount').textContent = pallet.count;
     if (shouldSound(code)) beep();
 
@@ -1172,11 +1214,11 @@ function handle(raw, decodeMs, format, skipFilter) {
 
   if (!cleared) { $('log').innerHTML = ''; cleared = true; }
   var row = document.createElement('tr');
+  var t = new Date();
   row.innerHTML =
     '<td class="c">' + code + '</td>' +
     '<td><span class="chip" style="--c:' + (vcolor || 'var(--ink-2)') + '">' + verdict + '</span></td>' +
-    '<td>' + (decodeMs ? decodeMs.toFixed(1) + ' ms' : '手入力') + '</td>' +
-    '<td>' + (gap ? (gap / 1000).toFixed(2) + ' s' : '—') + '</td>';
+    '<td>' + ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2) + ':' + ('0' + t.getSeconds()).slice(-2) + '</td>';
   $('log').prepend(row);
   while ($('log').children.length > 60) $('log').lastChild.remove();
 }
