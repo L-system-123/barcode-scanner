@@ -359,8 +359,6 @@
   #log tr.removed td.c { text-decoration: line-through; }
 
   /* ---- 管理番号を探す ---- */
-  #findCam { width: 100%; margin-top: 8px; }
-  #findCam.on { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
   #findResult { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
   #findResult:empty { display: none; }
   .hit {
@@ -505,7 +503,6 @@
       <input type="text" id="findInput" placeholder="12桁の管理番号" inputmode="numeric">
       <button id="findBtn">探す</button>
     </div>
-    <button id="findCam">カメラで探す</button>
     <div id="findResult"></div>
   </section>
 
@@ -1205,18 +1202,6 @@ function handle(raw, decodeMs, format, skipFilter) {
   /* 同じコードの連打を1.5秒間は無視する。実運用では必須 */
   if (raw === lastCode && now - lastCodeAt < 1500) return;
 
-  /* 「カメラで探す」の後の1箱は、パレットに数えずに探すだけ。
-     そのままカメラを向けていても二重に数えないよう、見続けている番号として扱う */
-  if (findNext) {
-    var fc = normCode(raw);
-    if (!fc.code) return;
-    setFindCam(false);
-    lastCode = raw; lastCodeAt = now;
-    currentCode = fc.code; seenAt[fc.code] = Date.now();
-    doFind(fc.code, true);
-    return;
-  }
-
   /* 枠がずれて別のバーコードを拾った場合はここで止める。
      黙って無視すると「壊れてる」のか「弾いた」のか分からないので、理由を出す */
   var chk = skipFilter ? { ok: true, digits: String(raw) } : accepted(raw);
@@ -1350,24 +1335,11 @@ function removeCarton(code, row) {
 /* ===== 管理番号を探す =====
    シートの スキャン記録 を過去分も含めて探す。
    積んでいる途中のパレット・未送信のパレットはシートに無いので、端末の中も見る */
-var findNext = false;
-function setFindCam(on) {
-  findNext = on;
-  $('findCam').classList.toggle('on', on);
-  $('findCam').textContent = on ? '次に読んだ箱を探します（押すと取りやめ）' : 'カメラで探す';
-}
-$('findCam').onclick = function () {
-  armAudio();
-  if (findNext) { setFindCam(false); return; }
-  setFindCam(true);
-  if (!running) start();
-  stage.scrollIntoView({ behavior: 'smooth', block: 'start' });
-};
 $('findBtn').onclick = function () {
   var nc = normCode($('findInput').value);
   if (!nc.code) { showFind([{ none: true, text: '12桁の管理番号を入れてください' }]); return; }
   $('findInput').value = '';
-  doFind(nc.code, false);
+  doFind(nc.code);
 };
 $('findInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') $('findBtn').click(); });
 
@@ -1377,7 +1349,7 @@ function stamp(ms) {
   return ('0' + (t.getMonth() + 1)).slice(-2) + '/' + ('0' + t.getDate()).slice(-2) + ' ' + hhmm(ms);
 }
 
-function doFind(code, fromCam) {
+function doFind(code) {
   var local = [];
   if (pallet.seen[code]) {
     local.push({ local: true, title: '積んでいる途中のパレット（未確定）', text: pallet.carrier ? pallet.carrier.name : '' });
@@ -1388,11 +1360,6 @@ function doFind(code, fromCam) {
     }
   });
   showFind(local.concat([{ none: true, text: code + ' を探しています…' }]));
-  if (fromCam) {
-    $('code').textContent = code;
-    $('band').textContent = '探しています…';
-    $('band').style.color = 'var(--ink-2)';
-  }
 
   api({ action: 'find', token: lsGet(KEY.token), code: code }).then(function (r) {
     if (!r.ok) {
@@ -1407,9 +1374,6 @@ function doFind(code, fromCam) {
     if (!all.length) all = [{ none: true, text: code + ' はまだどのパレットにも積まれていません' }];
     else all.unshift({ none: true, text: code + ' の結果' });
     showFind(all);
-    if (fromCam) {
-      $('band').textContent = hits.length ? '→ ' + hits[0].title : (local.length ? '→ ' + local[0].title : 'どのパレットにも無い');
-    }
   }).catch(function () {
     showFind(local.concat([{ none: true, text: '探せませんでした。電波を確認してください' }]));
   });
