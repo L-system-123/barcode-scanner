@@ -45,6 +45,7 @@ var TOKEN_HOURS = 12;          // ログインの有効時間。1シフトより
 var MISS_LIMIT = 5;            // 同じIDで続けて間違えたら、シート上で無効にする回数
 var FAIL_LIMIT_ALL = 30;       // 全体で間違いがこれだけ続いたら一時的に全員弾く（存在しないIDの総当たり対策）
 var FAIL_WINDOW_SEC = 15 * 60;
+var IDLE_MIN = 5;              // 同じIDは1台だけ。先の端末の最後の通信からこれだけ空いたら、別の端末で入れる
 
 /* ===== 入口 =====
    画面側は Content-Type: text/plain で JSON を送ってくる。
@@ -63,6 +64,7 @@ function doPost(e) {
       case 'commit': return reply(withUser(req, function (user) { return commit(req, user); }));
       case 'today':  return reply(withUser(req, function (user) { return today(req, user); }));
       case 'ping':   return reply(withUser(req, function () { return { ok: true }; }));
+      case 'logout': return reply(logout(req));
       default:       return reply({ ok: false, error: 'bad_action' });
     }
   } catch (err) {
@@ -192,6 +194,14 @@ function login(req) {
     /* 照合は大文字小文字を区別しないが、パレット番号や記録にはシートA列の表記をそのまま使う */
     user = String(u.values[U_ID - 1]).trim();
     sh.getRange(u.row, U_MISS).setValue(0);
+
+    /* 先にログインしている端末を優先する。最後の通信から IDLE_MIN 分たつまでは断る */
+    var props = PropertiesService.getScriptProperties();
+    var seen = lastSeen(props, user);
+    if (seen && Date.now() - seen < IDLE_MIN * 60000) {
+      return { ok: false, error: 'in_use', minutes: Math.ceil((seen + IDLE_MIN * 60000 - Date.now()) / 60000) };
+    }
+
     sh.getRange(u.row, U_LAST).setValue(new Date());
     /* 手で書かれた平文は、ここで暗号化した文字列に置き換える */
     if (!isHashed(u.values[U_HASH - 1])) sh.getRange(u.row, U_HASH).setValue(makeHash(pass));
@@ -200,11 +210,10 @@ function login(req) {
 
     /* トークンはスクリプト プロパティに置く。キャッシュは最長6時間で消えるためシフト中に切れる。
        期限切れは発行のたびに掃除するので溜まらない */
-    var props = PropertiesService.getScriptProperties();
     var token = Utilities.getUuid() + Utilities.getUuid();
     purgeTokens(props);
-    kickTokens(user);   // 同じIDで同時に使えるのは1台だけ。前の端末はここでログアウトさせる
-    props.setProperty('tok:' + token, JSON.stringify({ user: user, exp: Date.now() + TOKEN_HOURS * 3600 * 1000 }));
+    kickTokens(user);   // 通信が途絶えて IDLE_MIN 分たった前の端末は、ここでログアウトさせる
+    props.setProperty('tok:' + token, JSON.stringify({ user: user, exp: Date.now() + TOKEN_HOURS * 3600 * 1000, seen: Date.now() }));
     return { ok: true, token: token, user: user, hours: TOKEN_HOURS, master: readMaster() };
   } finally {
     lock.releaseLock();
@@ -224,7 +233,34 @@ function withUser(req, fn) {
   if (t.exp < Date.now()) return { ok: false, error: 'auth' };
   var u = findUser(usersSheet(), normUser(t.user));
   if (!u || !isOn(u.values[U_ON - 1])) return { ok: false, error: 'auth' };
+  /* 最後に通信した時刻を残す。別の端末からのログインを断るかどうかの判断に使う。
+     書き込みを減らすため30秒以内の更新は省く */
+  if (!t.seen || Date.now() - t.seen > 30000) {
+    t.seen = Date.now();
+    PropertiesService.getScriptProperties().setProperty('tok:' + String(req.token), JSON.stringify(t));
+  }
   return fn(t.user);
+}
+
+/* そのユーザーの有効なトークンのうち、一番新しい通信時刻 */
+function lastSeen(props, user) {
+  var all = props.getProperties(), now = Date.now(), latest = 0;
+  Object.keys(all).forEach(function (k) {
+    if (k.indexOf('tok:') !== 0) return;
+    try {
+      var t = JSON.parse(all[k]);
+      if (t.exp > now && normUser(t.user) === normUser(user)) latest = Math.max(latest, t.seen || 0);
+    } catch (e) {}
+  });
+  return latest;
+}
+
+/* 画面の「ログアウト」。すぐに別の端末で入れるよう、トークンを消す */
+function logout(req) {
+  var k = 'tok:' + String(req.token || '');
+  var props = PropertiesService.getScriptProperties();
+  if (props.getProperty(k)) props.deleteProperty(k);
+  return { ok: true };
 }
 
 function purgeTokens(props) {

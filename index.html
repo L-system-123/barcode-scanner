@@ -1314,7 +1314,8 @@ var LOGIN_MSG = {
   disabled_now: '5回続けて間違えたため、このIDを停止しました。管理者に連絡してください',
   busy: '間違いが続いたため一時的に受け付けていません。しばらく待ってください',
   no_api: '接続先URLを入れてください',
-  server: '受け口でエラーが起きました'
+  server: '受け口でエラーが起きました',
+  in_use: 'このIDは別の端末で使用中です。その端末でログアウトしてから、もう一度ログインしてください'
 };
 
 function showLogin(msg) {
@@ -1370,6 +1371,7 @@ $('lGo').onclick = function () {
     if (!r.ok) {
       var m = LOGIN_MSG[r.error] || ('ログインできません（' + r.error + '）');
       if (r.error === 'bad_login' && r.left) m += '（あと ' + r.left + ' 回で停止）';
+      if (r.error === 'in_use' && r.minutes) m += '（その端末を閉じていれば、あと約 ' + r.minutes + ' 分で入れます）';
       $('lMsg').textContent = m;
       $('lPass').value = '';
       return;
@@ -1396,6 +1398,8 @@ $('logout').onclick = function () {
   if (pallet.count && !confirm('確定していない読み取りが ' + pallet.count + ' 件あります。ログアウトすると消えます')) return;
   if (outbox.length && !confirm('未送信のパレットが ' + outbox.length + ' 枚あります。この端末に残し、次のログインで送ります')) return;
   resetPallet();
+  /* 受け口にも知らせる。知らせないと、この端末の最後の通信から5分間は別の端末で入れない */
+  if (lsGet(KEY.token)) api({ action: 'logout', token: lsGet(KEY.token) }).catch(function () {});
   lsSet(KEY.token, null);
   lsSet(KEY.master, null);
   CARRIERS = [];
