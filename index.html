@@ -1314,8 +1314,7 @@ var LOGIN_MSG = {
   disabled_now: '5回続けて間違えたため、このIDを停止しました。管理者に連絡してください',
   busy: '間違いが続いたため一時的に受け付けていません。しばらく待ってください',
   no_api: '接続先URLを入れてください',
-  server: '受け口でエラーが起きました',
-  in_use: 'このIDは別の端末で使用中です。その端末でログアウトしてから、もう一度ログインしてください'
+  server: '受け口でエラーが起きました'
 };
 
 function showLogin(msg) {
@@ -1371,7 +1370,6 @@ $('lGo').onclick = function () {
     if (!r.ok) {
       var m = LOGIN_MSG[r.error] || ('ログインできません（' + r.error + '）');
       if (r.error === 'bad_login' && r.left) m += '（あと ' + r.left + ' 回で停止）';
-      if (r.error === 'in_use' && r.minutes) m += '（その端末を閉じていれば、あと約 ' + r.minutes + ' 分で入れます）';
       $('lMsg').textContent = m;
       $('lPass').value = '';
       return;
@@ -1398,8 +1396,6 @@ $('logout').onclick = function () {
   if (pallet.count && !confirm('確定していない読み取りが ' + pallet.count + ' 件あります。ログアウトすると消えます')) return;
   if (outbox.length && !confirm('未送信のパレットが ' + outbox.length + ' 枚あります。この端末に残し、次のログインで送ります')) return;
   resetPallet();
-  /* 受け口にも知らせる。知らせないと、この端末の最後の通信から5分間は別の端末で入れない */
-  if (lsGet(KEY.token)) api({ action: 'logout', token: lsGet(KEY.token) }).catch(function () {});
   lsSet(KEY.token, null);
   lsSet(KEY.master, null);
   CARRIERS = [];
@@ -1431,7 +1427,11 @@ function flushOutbox() {
         else loadToday();
         return;
       }
-      if (lostSession(r.error)) return;
+      if (r.error === 'auth') {
+        lsSet(KEY.token, null);
+        showLogin('ログインの期限が切れました。もう一度ログインしてください（未送信分は残っています）');
+        return;
+      }
       showSendStat('送信できません（' + r.error + '）', 'bad');
     })
     .catch(function () {
@@ -1456,31 +1456,6 @@ function showSendStat(msg, cls) {
 
 window.addEventListener('online', flushOutbox);
 
-/* ===== ログインが切れた時 =====
-   同じIDで使えるのは1台だけ。別の端末でログインすると、こちらは 'kicked' が返る。
-   読み取り中のパレットと未送信分は消さずに残し、ログインし直せば続きから使える */
-function lostSession(err) {
-  if (err !== 'auth' && err !== 'kicked') return false;
-  lsSet(KEY.token, null);
-  var msg = err === 'kicked'
-    ? '別の端末で同じIDがログインされたため、ログアウトしました'
-    : 'ログインの期限が切れました。もう一度ログインしてください';
-  if (outbox.length || pallet.count) msg += '（読み取り中・未送信の分は残っています）';
-  showLogin(msg);
-  return true;
-}
-
-/* 1分ごとと、画面に戻ってきた時に、まだログインが有効かを確かめる。
-   別の端末に取られたことに、確定を押すまで気づかないのを防ぐ */
-function ping() {
-  if (!lsGet(KEY.token) || !$('login').hidden || document.hidden) return;
-  api({ action: 'ping', token: lsGet(KEY.token) }).then(function (r) {
-    if (!r.ok) lostSession(r.error);
-  }).catch(function () {});
-}
-setInterval(ping, 60000);
-document.addEventListener('visibilitychange', function () { if (!document.hidden) ping(); });
-
 /* ===== 今日のパレット =====
    シートの スキャン記録 から今日の分を受け取って並べる。押すと管理番号の一覧が開く。
    まだ送れていないパレット（送信待ち）も「未送信」として上に出す。
@@ -1495,7 +1470,10 @@ function loadToday() {
       todayData = r.pallets || [];
       $('todayMsg').textContent = '';
       renderToday();
-    } else if (!lostSession(r.error)) {
+    } else if (r.error === 'auth') {
+      lsSet(KEY.token, null);
+      showLogin('ログインの期限が切れました');
+    } else {
       $('todayMsg').textContent = '読み込めません（' + r.error + '）';
     }
   }).catch(function () {
@@ -1606,8 +1584,9 @@ $('todayAll').onchange = function () { todayOpen = {}; loadToday(); };
     if (r.ok) {
       setMaster(r.master);
       if (!cached || !cached.length) enterApp(user);
-    } else {
-      lostSession(r.error);
+    } else if (r.error === 'auth') {
+      lsSet(KEY.token, null);
+      showLogin('ログインの期限が切れました');
     }
   }).catch(function () {
     /* 電波が無くても、前回のマスタがあればスキャンはできる。送信は後で */
