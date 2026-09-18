@@ -1,0 +1,1411 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<style>
+  :root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  body { margin: 0; font: 14px system-ui, sans-serif; background: #f5f5f5; }
+  img { max-width: 100%; }
+  [hidden] { display: none !important; }
+</style>
+<title>帯域スキャン計測器</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600&family=JetBrains+Mono:wght@400;700&display=swap">
+<style>
+  :root {
+    --paper:   #e9edf0;
+    --panel:   #ffffff;
+    --ink:     #151a1f;
+    --ink-2:   #5b6672;
+    --line:    #d2d9df;
+    --signal:  #d03a3a;
+    --ok:      #1a8a5c;
+    --shadow:  0 1px 2px rgba(21,26,31,.08), 0 6px 18px rgba(21,26,31,.06);
+    --chip-fx: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:  #0e1216;
+      --panel:  #161b21;
+      --ink:    #e5eaef;
+      --ink-2:  #8a96a3;
+      --line:   #28313a;
+      --signal: #ff5c5c;
+      --ok:     #3ec089;
+      --shadow: 0 1px 2px rgba(0,0,0,.5), 0 6px 18px rgba(0,0,0,.35);
+      --chip-fx: brightness(1.35) saturate(.9);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:  #0e1216;
+    --panel:  #161b21;
+    --ink:    #e5eaef;
+    --ink-2:  #8a96a3;
+    --line:   #28313a;
+    --signal: #ff5c5c;
+    --ok:     #3ec089;
+    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 6px 18px rgba(0,0,0,.35);
+    --chip-fx: brightness(1.35) saturate(.9);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif;
+    line-height: 1.6;
+  }
+  /* 左右の余白は各要素側に持たせる。
+     こうするとカメラだけを余白の外に出せて、画面の端まで使える */
+  .wrap {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 20px 0 48px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .wrap > * { margin-inline: 16px; }
+  .wrap > .stage { margin-inline: 0; }
+
+  .label, .eyebrow {
+    font-family: "Barlow Semi Condensed", "Hiragino Kaku Gothic ProN", sans-serif;
+    text-transform: uppercase;
+    letter-spacing: .14em;
+    font-weight: 600;
+    color: var(--ink-2);
+  }
+  .eyebrow { font-size: 12px; }
+  .label   { font-size: 11px; }
+
+  h1 {
+    font-family: "Barlow Semi Condensed", "Hiragino Kaku Gothic ProN", sans-serif;
+    font-size: 30px; font-weight: 600; line-height: 1.15;
+    margin: 2px 0 0; text-wrap: balance;
+  }
+  h2 {
+    font-family: "Barlow Semi Condensed", "Hiragino Kaku Gothic ProN", sans-serif;
+    font-size: 15px; font-weight: 600; letter-spacing: .04em;
+    margin: 0 0 8px;
+  }
+  .sub { color: var(--ink-2); font-size: 13px; margin: 6px 0 0; }
+
+  /* ---- カメラ ---- */
+  /* aspect-ratio と max-height を併用すると、高さが上限に当たった時に
+     ブラウザが比率を保とうとして幅を縮める（右側に余白ができる）。
+     幅と高さを直に指定して比率計算をさせない。
+     読み取り範囲は枠の実寸から計算しているので、どんな形でもズレない */
+  .stage {
+    position: relative; overflow: hidden;
+    background: #05070a;
+    width: 100%; height: 66vh; min-height: 240px;
+    box-shadow: var(--shadow);
+    border-radius: 0;
+  }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .reticle {
+    position: absolute; inset: 34% 6%; pointer-events: none;
+    border: 1px solid rgba(255,255,255,.35); border-radius: 4px;
+    box-shadow: 0 0 0 9999px rgba(0,0,0,.42);
+  }
+  .zoomwrap {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    font: 600 11px/1 "Barlow Semi Condensed", system-ui, sans-serif;
+    letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2);
+  }
+  .zoomwrap input { flex: 1; }
+  /* ---- パレット ---- */
+  .pallet {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; box-shadow: var(--shadow);
+  }
+  .pcol { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+  .pcol.pnum { margin-left: auto; text-align: right; }
+  .pv {
+    font-family: "Barlow Semi Condensed", sans-serif; font-weight: 600;
+    font-size: 22px; line-height: 1.1; filter: var(--chip-fx);
+  }
+  .pnum .pv { font-family: "JetBrains Mono", monospace; font-variant-numeric: tabular-nums; }
+  .pbtns { display: flex; gap: 8px; width: 100%; }
+  #commitPallet { flex: 2 1 0; }
+  #newPallet { flex: 1 1 0; }
+  .sendstat { width: 100%; font-size: 12.5px; color: var(--ink-2); min-height: 1em; }
+  .sendstat:empty { display: none; }
+  .sendstat.bad { color: var(--signal); font-weight: 700; }
+  .sendstat.good { color: var(--ok); }
+  .sendstat button { font-size: 12.5px; padding: 3px 10px; margin-left: 6px; }
+
+  /* ---- ログイン ----
+     仕分け表はログインしてから Apps Script に取りに行く。
+     このページ自体は公開なので、社名や表はここに書かない */
+  .who {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; color: var(--ink-2);
+  }
+  .who b { font-family: "JetBrains Mono", monospace; color: var(--ink); }
+  .who button { margin-left: auto; font-size: 12.5px; padding: 5px 12px; }
+  .login {
+    position: fixed; inset: 0; z-index: 40; background: var(--paper);
+    display: grid; place-items: center; padding: 24px 16px;
+    padding-top: calc(24px + env(safe-area-inset-top, 0px));
+    overflow-y: auto;
+  }
+  .loginbox {
+    width: 100%; max-width: 360px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+    padding: 20px 18px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .loginbox h2 { font-size: 20px; margin-bottom: 6px; }
+  .loginbox label { margin-top: 8px; display: block; }
+  .loginbox input {
+    width: 100%; padding: 11px 12px; font-size: 16px;
+    border: 1px solid var(--line); border-radius: 7px;
+    background: var(--paper); color: var(--ink);
+  }
+  #lUser { font-family: "JetBrains Mono", monospace; }
+  .loginbox .go { margin-top: 14px; }
+  #lMsg { font-size: 13px; color: var(--signal); font-weight: 700; min-height: 1.2em; margin-top: 4px; }
+  .linkbtn {
+    background: none; border: 0; padding: 4px 0; font-size: 12px;
+    color: var(--ink-2); text-decoration: underline; align-self: flex-start;
+  }
+
+  /* ---- 警報 ---- */
+  /* 赤＝違う運送会社が混ざった（積み替えが要る）
+     黄＝同じ運送会社で同じ管理番号を二度読んだ（数え間違いの防止）
+     一目で区別が付くよう、色だけでなく記号と文字色も変える */
+  .alert {
+    position: fixed; inset: 0; z-index: 50;
+    --a-bg:   rgba(190, 20, 20, .94);
+    --a-bg2:  rgba(120, 8, 8, .96);
+    --a-ink:  #fff;
+    --a-btn:  #b31616;
+    background: var(--a-bg);
+    display: grid; place-items: center; padding: 24px;
+    padding-top: calc(24px + env(safe-area-inset-top, 0px));
+  }
+  .alert.warn {
+    --a-bg:   rgba(240, 179, 0, .96);
+    --a-bg2:  rgba(205, 148, 0, .97);
+    --a-ink:  #241c00;
+    --a-btn:  #6b4f00;
+  }
+  .alertbox { text-align: center; color: var(--a-ink); max-width: 420px; }
+  .alertmark {
+    width: 66px; height: 66px; margin: 0 auto 14px; border-radius: 50%;
+    border: 3px solid var(--a-ink); display: grid; place-items: center;
+    font-size: 38px; font-weight: 700; line-height: 1;
+  }
+  .alertbox h2 { font-size: 26px; margin: 0 0 8px; color: var(--a-ink); }
+  .alertbox p {
+    margin: 0 0 20px; font-size: 15px; line-height: 1.6;
+    word-break: break-all; color: var(--a-ink); opacity: .92;
+  }
+  .alertbox button {
+    background: var(--a-ink); color: var(--a-btn); border-color: var(--a-ink);
+    font-weight: 700; padding: 13px 30px; font-size: 16px;
+  }
+  body.alerting .stage { outline: 3px solid var(--signal); outline-offset: -3px; }
+  body.alerting-warn .stage { outline-color: #f0b300; }
+  @media (prefers-reduced-motion: no-preference) {
+    .alert { animation: flash .45s steps(1) 3; }
+    @keyframes flash { 50% { background: var(--a-bg2); } }
+  }
+
+  .reticle::before, .reticle::after {
+    content: ""; position: absolute; left: -1px; right: -1px; height: 14px;
+    border-left: 2px solid var(--signal); border-right: 2px solid var(--signal);
+  }
+  .reticle::before { top: -1px; border-top: 2px solid var(--signal); }
+  .reticle::after  { bottom: -1px; border-bottom: 2px solid var(--signal); }
+  .beam {
+    position: absolute; left: 8%; right: 8%; top: 50%; height: 2px;
+    background: var(--signal); box-shadow: 0 0 8px var(--signal);
+    pointer-events: none; opacity: .9;
+  }
+  .scanning .beam { animation: sweep 2.1s ease-in-out infinite; }
+  @keyframes sweep {
+    0%, 100% { transform: translateY(-88px); }
+    50%      { transform: translateY(88px); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .scanning .beam { animation: none; }
+  }
+  .idle-note {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    color: rgba(255,255,255,.62); font-size: 13px; text-align: center; padding: 20px;
+  }
+  .stage.scanning .idle-note { display: none; }
+
+  /* ---- 操作 ---- */
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button {
+    font-family: inherit; font-size: 15px; padding: 11px 18px;
+    border-radius: 7px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--ink); cursor: pointer;
+  }
+  button.go { background: var(--signal); border-color: var(--signal); color: #fff; font-weight: 700; }
+  button[disabled] { opacity: .45; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .engine {
+    margin-left: auto; font-family: "JetBrains Mono", monospace;
+    font-size: 11px; color: var(--ink-2);
+  }
+
+  /* ---- 読取結果 ---- */
+  .readout {
+    background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--line);
+    border-radius: 8px; padding: 14px 16px; box-shadow: var(--shadow);
+  }
+  #code {
+    font-family: "JetBrains Mono", monospace; font-size: 26px; font-weight: 700;
+    letter-spacing: .02em; word-break: break-all; margin-top: 2px;
+  }
+  #band { font-weight: 700; font-size: 15px; margin-top: 4px; color: var(--ink-2); filter: var(--chip-fx); }
+
+  /* ---- 計測値 ---- */
+  .meters { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .meter {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 12px; display: flex; flex-direction: column; gap: 2px;
+  }
+  .meter .v {
+    font-family: "JetBrains Mono", monospace; font-variant-numeric: tabular-nums;
+    font-size: 21px; font-weight: 700;
+  }
+  .meter .u { font-size: 11px; color: var(--ink-2); font-family: "JetBrains Mono", monospace; }
+
+  /* ---- 表 ---- */
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    font-family: "Barlow Semi Condensed", sans-serif; text-transform: uppercase;
+    letter-spacing: .1em; font-size: 11px; color: var(--ink-2); font-weight: 600;
+    text-align: left; padding: 4px 8px 6px; border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  td {
+    padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  td.c { font-family: "JetBrains Mono", monospace; }
+  tr.sample td { color: var(--ink-2); font-style: italic; }
+  .chip { font-weight: 700; color: var(--c, var(--ink-2)); filter: var(--chip-fx); }
+
+  .bands { display: flex; flex-direction: column; gap: 6px; }
+  .bandrow {
+    display: flex; gap: 10px; align-items: baseline;
+    border-bottom: 1px dotted var(--line); padding-bottom: 6px;
+  }
+  .bandrow:last-child { border-bottom: 0; }
+  .bandrow .r {
+    font-family: "JetBrains Mono", monospace; font-size: 11.5px;
+    color: var(--ink-2); margin-left: auto; white-space: nowrap;
+  }
+
+  .manual { display: flex; gap: 8px; }
+  input[type=text] {
+    flex: 1 1 auto; min-width: 0; padding: 10px 12px; font-size: 15px;
+    font-family: "JetBrains Mono", monospace;
+    border: 1px solid var(--line); border-radius: 7px;
+    background: var(--panel); color: var(--ink);
+  }
+
+  .fault {
+    border: 1px solid var(--signal); border-left: 4px solid var(--signal);
+    border-radius: 8px; padding: 14px 16px; background: var(--panel);
+  }
+  .fault h2 { color: var(--signal); }
+  .fault code {
+    font-family: "JetBrains Mono", monospace; font-size: 12px;
+    background: var(--paper); padding: 1px 5px; border-radius: 3px; word-break: break-all;
+  }
+  .fault p { margin: 0 0 8px; font-size: 13.5px; }
+  .fault p:last-child { margin-bottom: 0; }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">スキャン速度 実測</div>
+    <h1>帯域スキャン計測器</h1>
+    <p class="sub">カメラでバーコードを読み、番号の帯域ごとに振り分ける。1フレームあたりのデコード時間を実測する。</p>
+  </header>
+
+  <div class="who" id="who" hidden>
+    <span>ユーザー <b id="whoId">—</b></span>
+    <button id="logout">ログアウト</button>
+  </div>
+
+  <div class="stage" id="stage">
+    <video id="v" playsinline muted></video>
+    <div class="reticle"></div>
+    <div class="beam"></div>
+    <div class="idle-note">「開始」を押すと背面カメラが起動します</div>
+  </div>
+
+  <div class="controls">
+    <button id="start" class="go">開始</button>
+    <button id="stop" disabled>停止</button>
+    <button id="torch" hidden>ライト</button>
+    <span class="engine" id="engine">engine: —</span>
+  </div>
+
+  <div class="zoomwrap" id="zoomwrap" hidden>
+    <span>ズーム</span>
+    <input type="range" id="zoom" min="1" max="1" step="0.1" value="1">
+    <span id="zoomV">1.0×</span>
+  </div>
+
+  <div class="pallet">
+    <div class="pcol">
+      <span class="label">このパレットの運送会社</span>
+      <span class="pv" id="pCarrier">—</span>
+    </div>
+    <div class="pcol pnum">
+      <span class="label">読取</span>
+      <span class="pv" id="pCount">0</span>
+    </div>
+    <div class="pbtns">
+      <button id="commitPallet" class="go" disabled>パレット確定</button>
+      <button id="newPallet">破棄</button>
+    </div>
+    <div class="sendstat" id="sendStat"></div>
+  </div>
+
+  <div class="readout" id="readout">
+    <div class="label">読取コード</div>
+    <div id="code">—</div>
+    <div id="band">待機中</div>
+    <div id="fmt" class="label">種別 —</div>
+  </div>
+
+  <div class="meters">
+    <div class="meter">
+      <span class="label">デコード</span>
+      <span class="v" id="mDecode">—</span>
+      <span class="u">ms / frame</span>
+    </div>
+    <div class="meter">
+      <span class="label">レート</span>
+      <span class="v" id="mFps">—</span>
+      <span class="u">fps</span>
+    </div>
+    <div class="meter">
+      <span class="label">読取間隔</span>
+      <span class="v" id="mGap">—</span>
+      <span class="u">秒 / 件</span>
+    </div>
+  </div>
+
+  <div class="alert" id="alert" hidden>
+    <div class="alertbox">
+      <div class="alertmark" id="alertMark">!</div>
+      <h2 id="alertTitle">—</h2>
+      <p id="alertDetail"></p>
+      <button id="alertOk">確認した</button>
+    </div>
+  </div>
+
+  <div class="login" id="login" hidden>
+    <div class="loginbox">
+      <h2>ログイン</h2>
+      <div id="apiRow" hidden>
+        <label class="label" for="lApi">接続先URL（初回だけ）</label>
+        <input id="lApi" type="url" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec">
+      </div>
+      <label class="label" for="lUser">ユーザーID</label>
+      <input id="lUser" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false">
+      <label class="label" for="lPass">パスワード</label>
+      <input id="lPass" type="password" autocomplete="current-password">
+      <button id="lGo" class="go">ログイン</button>
+      <div id="lMsg"></div>
+      <button id="lApiEdit" class="linkbtn">接続先を変更</button>
+    </div>
+  </div>
+
+  <div class="fault" id="fault" hidden>
+    <h2>カメラを起動できません</h2>
+    <p id="faultMsg"></p>
+    <p id="faultHint"></p>
+  </div>
+
+  <section>
+    <h2>手入力で帯域判定を試す</h2>
+    <div class="manual">
+      <input type="text" id="manual" placeholder="例 4901234567894" inputmode="numeric">
+      <button id="manualBtn">判定</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>読取ログ</h2>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>コード</th><th>帯域</th><th>デコード</th><th>間隔</th></tr>
+        </thead>
+        <tbody id="log">
+          <tr class="sample"><td class="c">4901234567894</td><td>D: JAN（商品）</td><td>—</td><td>例</td></tr>
+          <tr class="sample"><td class="c">2000451200</td><td>B: 出荷ラベル</td><td>—</td><td>例</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>帯域の割り当て</h2>
+    <div class="bands" id="bandlist"></div>
+  </section>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+/* ===== 仕分け先の帯域表 =====
+   管理番号は12桁で 上4桁 + 中4桁 + 下4桁。上4桁が仕分け先を表す。
+   上4桁が重複する組（0841 と 0854。それぞれ2つの配送CDが同じ上4桁を使う）は
+   中4桁の範囲で分かれるので、mid を持つものはそこまで見る。
+
+   このページは公開の GitHub Pages に置くので、表そのものは持たない。
+   ログインが通った時に Apps Script がスプレッドシートの マスタ タブを返し、ここに入る。
+   表を変える時はシートの マスタ タブを書き換える（このファイルは触らない）。
+
+   表に載っていない番号は「対象外」として静かに無視する。
+   同じラベルの別のバーコードを枠がズレて拾っても誤警報にならないように、
+   照合の対象は「表に載っている番号」だけに限る。 */
+var CARRIERS = [];
+var DEFAULT_COLOR = "#3a7bd5";
+var UNKNOWN = { name: "対象外", color: "" };
+
+/* 帯域判定は端末内で完結する。サーバー往復なしで実質 0ms */
+function judge(code) {
+  var digits = String(code).replace(/\D/g, "");
+  if (digits.length !== 12) return UNKNOWN;
+
+  var head = digits.slice(0, 4);
+  var mid  = parseInt(digits.slice(4, 8), 10);
+
+  var hit = [];
+  for (var p = 0; p < CARRIERS.length; p++) {
+    if (CARRIERS[p].head === head) hit.push(CARRIERS[p]);
+  }
+  if (!hit.length) return UNKNOWN;
+  /* 上4桁がその仕分け先だけのものなら、中4桁は見る必要がない。
+     実データでは表の記載範囲を超えて運用されている先があり（例 0814）、
+     ここで弾くと正しい番号が大量に対象外になる。
+     中4桁は下の「上4桁が重複する組」を分ける時だけ使う。 */
+  if (hit.length === 1) return hit[0];
+
+  /* 上4桁が重複する組。中4桁で分かれる */
+  for (var q = 0; q < hit.length; q++) {
+    var c = hit[q];
+    if (c.mid && mid >= c.mid[0] && mid <= c.mid[1]) return c;
+  }
+  /* どの帯にも当たらない。黙って片方に寄せると混載を見逃すので、別物として扱う */
+  return {
+    name: "判別不能（上4桁 " + head + "）",
+    color: "#c07a10",
+    note: hit.map(function (c) { return c.name; }).join(" / ") + " のどれか",
+    ambiguous: true
+  };
+}
+
+var $ = function (id) { return document.getElementById(id); };
+var video = $('v'), stage = $('stage');
+var stream = null, track = null, running = false, engine = '', reader = null;
+var lastCode = '', lastCodeAt = 0, lastScanAt = 0;
+var frames = 0, fpsT0 = 0, cleared = false;
+
+/* 仕分け先の一覧を描く。マスタを受け取るたびに描き直す */
+function renderBands() {
+  var host = $('bandlist');
+  host.innerHTML = '';
+  CARRIERS.forEach(function (b) {
+    var row = document.createElement('div');
+    row.className = 'bandrow';
+    var range = b.head + '-' +
+      (b.mid ? pad4(b.mid[0]) + '〜' + pad4(b.mid[1]) : '****') + '-****';
+    row.innerHTML = '<span class="chip" style="--c:' + (b.color || 'var(--ink-2)') + '">' +
+                    (b.cd ? b.cd + ' ' : '') + b.name + '</span>' +
+                    '<span class="r">' + range + (b.check ? ' ／ CD要' : '') + '</span>';
+    host.appendChild(row);
+  });
+}
+function pad4(n) { return ('000' + n).slice(-4); }
+
+/* 実際に取れた解像度と、いま動いているデコーダ。
+   wasm版は読み込みが終わり次第あとから切り替わるので、その時も呼び直す */
+function showEngine() {
+  var st = DIAG.settings || {};
+  var res = (st.width || video.videoWidth || '?') + '×' + (st.height || video.videoHeight || '?');
+  var dec = engine;
+  if (engine.indexOf('ZXing') === 0) dec = wasmZX ? 'ZXing wasm' : 'ZXing js';
+  $('engine').textContent = res + ' / ' + dec;
+}
+
+function fault(title, msg, hint) {
+  $('fault').hidden = false;
+  $('faultMsg').innerHTML = msg;
+  $('faultHint').innerHTML = hint;
+}
+
+async function start() {
+  if (running) return;
+  armAudio();               /* ボタンを押した今のうちに音の許可を取る（iOSの制約） */
+  $('fault').hidden = true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      /* 4K(2160x3840)は iPhone SE3 でも要求は通るが、実測すると
+         デコードが 10ms → 150ms に増えるだけで読める距離は変わらなかった。
+         センサー出力を引き伸ばしているだけで情報量が増えていないと見られる。
+         払い損なので 1080p に戻す。1秒あたりの試行回数はこちらが15倍多い */
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: 1920 },
+        height: { ideal: 1080 },
+        advanced: [{ focusMode: 'continuous' }]
+      },
+      audio: false
+    });
+  } catch (e) {
+    var hint = e.name === 'NotAllowedError'
+      ? 'ブラウザで許可していない場合はアドレスバーのカメラ許可を確認。許可しているのにこれが出る場合は、このページを埋め込んでいる枠がカメラを許可していない。その時はHTMLを自前のHTTPS（GitHub Pages など）に置けば同じコードがそのまま動く。'
+      : (e.name === 'NotFoundError'
+          ? 'この端末にカメラが見つからない。下の手入力欄で帯域判定だけ試せる。'
+          : 'カメラが他のアプリに掴まれている可能性がある。他のカメラアプリやタブを閉じて再試行。');
+    fault('', '<code>' + e.name + '</code> ' + (e.message || ''), hint);
+    $('engine').textContent = 'engine: 停止';
+    return;
+  }
+
+  video.srcObject = stream;
+  await video.play();
+  track = stream.getVideoTracks()[0];
+
+
+  running = true;
+  stage.classList.add('scanning');
+  $('start').disabled = true;
+  $('stop').disabled = false;
+  fpsT0 = performance.now(); frames = 0;
+
+  /* ピント固定を避ける。小さいバーコードに寄ると固定AFではボケる */
+  try { await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {}
+
+  /* 暗い倉庫向け。対応端末だけライトボタンを出す */
+  var caps = track.getCapabilities ? track.getCapabilities() : {};
+
+  /* 光学/デジタルズーム。バーを太らせる一番効く手段なので対応端末では出す */
+  if (caps && caps.zoom) {
+    $('zoomwrap').hidden = false;
+    var z = $('zoom');
+    z.min = caps.zoom.min; z.max = caps.zoom.max;
+    z.step = caps.zoom.step || 0.1;
+    z.value = track.getSettings().zoom || caps.zoom.min;
+    $('zoomV').textContent = (+z.value).toFixed(1) + '×';
+    /* applyConstraints はカメラの再設定を伴うので重い。
+       スライダーを動かすたびに投げると再設定が詰まって数秒固まる。
+       最後の値だけを、前の適用が終わってから投げる */
+    var zBusy = false, zWant = null;
+    function applyZoom() {
+      if (zBusy || zWant === null) return;
+      zBusy = true;
+      var v = zWant; zWant = null;
+      track.applyConstraints({ advanced: [{ zoom: v }] })
+        .catch(function () {})
+        .then(function () { zBusy = false; applyZoom(); });
+    }
+    z.oninput = function () {
+      $('zoomV').textContent = (+z.value).toFixed(1) + '×';
+      zWant = +z.value;
+      applyZoom();
+    };
+  }
+
+  if (caps && caps.torch) {
+    $('torch').hidden = false;
+    $('torch').onclick = function () {
+      var on = $('torch').dataset.on === '1';
+      track.applyConstraints({ advanced: [{ torch: !on }] });
+      $('torch').dataset.on = on ? '0' : '1';
+    };
+  }
+
+  DIAG.settings = track.getSettings ? track.getSettings() : null;
+
+  DIAG.caps = caps;
+
+  if ('BarcodeDetector' in window) {
+    engine = 'BarcodeDetector (native)';
+
+    /* 端末が codabar に対応していないのに codabar だけ要求すると、
+       毎フレーム例外か空振りになって「無言で読まない」状態になる。
+       対応形式を聞いて、無ければ全形式に自動で広げる */
+    var use = FORMATS;
+    try {
+      DIAG.supported = await BarcodeDetector.getSupportedFormats();
+      var ok = FORMATS.filter(function (f) { return DIAG.supported.indexOf(f) >= 0; });
+      if (!ok.length) {
+        use = WIDE_FORMATS.filter(function (f) { return DIAG.supported.indexOf(f) >= 0; });
+        DIAG.notes.push('codabar 非対応の端末。全形式に自動で切替えた');
+      } else {
+        use = ok;
+      }
+    } catch (e) {
+      DIAG.notes.push('getSupportedFormats 失敗: ' + e.name);
+    }
+    DIAG.usedFormats = use;
+    showEngine();
+
+    var det;
+    try {
+      det = new BarcodeDetector({ formats: use });
+    } catch (e) {
+      DIAG.notes.push('BarcodeDetector 生成失敗: ' + e.name + ' ' + e.message);
+      det = new BarcodeDetector();
+      DIAG.notes.push('形式指定なしで作り直した');
+    }
+    loopNative(det);
+  } else if (window.ZXing) {
+    engine = 'ZXing (js fallback)';
+    showEngine();
+    loopZXing();
+  } else {
+    fault('', 'デコーダを読み込めなかった', 'ネットワークがCDNを遮断している可能性がある。');
+  }
+}
+
+function stop() {
+  running = false;
+  stage.classList.remove('scanning');
+  if (reader) { try { reader.reset(); } catch (e) {} reader = null; }
+  if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+  stream = null; track = null;
+  $('start').disabled = false;
+  $('stop').disabled = true;
+  $('torch').hidden = true;
+  $('engine').textContent = 'engine: 停止 (' + engine + ')';
+}
+
+/* ===== 枠(reticle)の中だけを切り出して拡大する =====
+   狙い2つ:
+     1. ラベルに4本バーコードが並んでいても、枠に入れた1本だけが対象になる
+     2. 切り出した領域を拡大するので、細いバーがデコーダに届く太さになる
+   数値は CSS の .reticle { inset: 34% 6% } と一致させること */
+/* ===== 読む種類を絞る =====
+   デコーダは指定された形式を順に試すので、使わない形式を並べるとその分だけ遅くなる。
+   対象のラベルは4本とも Codabar(NW-7)。JAN商品も読むなら 'ean_13' を足す */
+var FORMATS = ['codabar'];   /* 「全形式で試す」ボタンで差し替わるので var のまま */
+
+/* ===== 受理ルール =====
+   枠から外れて隣のバーコードを拾った時に、それを"読めた"事にしないための最後の砦。
+   右下 = 12桁。上段は11桁なので桁数だけで弾ける。
+   左下も12桁だが先頭が 01、右下は 02 なので先頭2桁で分かれる。
+   ※この2行が今わかっている事実ベースの暫定値。正式な採番ルールが分かったら差し替える */
+/* 管理番号は12桁。ただしチェックデジットが「必要」な仕分け先は
+   バーコードが13桁（12桁＋検査数字1桁）で印字されている可能性がある。
+   13桁を弾くと、その仕分け先を丸ごと取りこぼすことになるので受け付ける。
+   検査数字の計算方法は未判明なので、いまは持っておくだけで検証はしない。 */
+function normCode(raw) {
+  var d = String(raw).replace(/[^0-9]/g, '');   /* Codabar の start/stop 記号(a〜d)を落とす */
+  if (d.length === 13) return { code: d.slice(0, 12), check: d.slice(12), len: 13 };
+  if (d.length === 12) return { code: d, check: '', len: 12 };
+  return { code: '', check: '', len: d.length, digits: d };
+}
+
+function accepted(raw) {
+  var nc = normCode(raw);
+  if (!nc.code) return { ok: false, why: '桁数 ' + nc.len + '（12桁か13桁のみ）', digits: nc.digits || '' };
+  var c = judge(nc.code);
+  if (c === UNKNOWN) return { ok: false, why: '帯域表に無い番号', digits: nc.code };
+  return { ok: true, digits: nc.code, carrier: c, check: nc.check };
+}
+
+/* ===== 誤読よけ =====
+   ZXing は Codabar で "B3B"（1文字）のような短い誤読を頻繁に返す。
+   同じ値を2回続けて読めた時だけ本物として扱う。
+   正しい12桁は連続で一致するが、誤読は毎回違う値になるので消える */
+var CONFIRM_N = 2;
+var pending = '', pendingN = 0;
+function confirmed(raw) {
+  if (raw === pending) { pendingN++; }
+  else { pending = raw; pendingN = 1; }
+  return pendingN >= CONFIRM_N;
+}
+
+/* ===== 読取音 =====
+   iOS は画面を触った瞬間でないと音を鳴らす許可が下りないので、
+   「開始」ボタンの中で先に鳴らせる状態にしておく */
+var actx = null;
+function armAudio() {
+  try {
+    if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (actx.state === 'suspended') actx.resume();
+  } catch (e) { DIAG.notes.push('音の初期化に失敗: ' + e.name); }
+}
+function beep() {
+  if (!actx) return;
+  try {
+    var o = actx.createOscillator(), g = actx.createGain();
+    o.type = 'square'; o.frequency.value = 2000;
+    g.gain.setValueAtTime(0.0001, actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.25, actx.currentTime + 0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001, actx.currentTime + 0.09);
+    o.connect(g); g.connect(actx.destination);
+    o.start(); o.stop(actx.currentTime + 0.1);
+  } catch (e) {}
+}
+
+/* 警告音。読取音(2000Hz)とはっきり区別が付くよう低い音を刻む。
+   画面を見ていなくても区別できるよう、混載と重複で音も変える。
+     混載(赤) … 低く濁った音を3回。止まって積み替える合図
+     重複(黄) … 少し高い音を2回。数え直せばよいだけなので軽くする */
+function alarm(level) {
+  var warn = level === 'warn';
+  if (actx) {
+    try {
+      var n = warn ? 2 : 3;
+      for (var i = 0; i < n; i++) {
+        var t = actx.currentTime + i * (warn ? 0.14 : 0.17);
+        var o = actx.createOscillator(), g = actx.createGain();
+        o.type = warn ? 'triangle' : 'sawtooth';
+        o.frequency.value = warn ? 760 : 320;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(warn ? 0.28 : 0.35, t + 0.01);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + (warn ? 0.11 : 0.14));
+        o.connect(g); g.connect(actx.destination);
+        o.start(t); o.stop(t + (warn ? 0.12 : 0.15));
+      }
+    } catch (e) {}
+  }
+  if (navigator.vibrate) navigator.vibrate(warn ? [70, 70, 70] : [90, 60, 90, 60, 90]);
+}
+
+/* ===== パレット =====
+   1枚目のスキャンでそのパレットの運送会社が決まる。
+   以降それと違う会社が出たら混載。倒すまで警報を残す */
+var pallet = newPalletState();
+
+/* clientId はシートへの二重書き込み防止用。再送しても同じパレットだと分かるようにする */
+function newPalletState() {
+  return { carrier: null, seen: {}, count: 0, items: [], startedAt: Date.now(), clientId: makeId() };
+}
+function makeId() {
+  var a = new Uint8Array(16);
+  crypto.getRandomValues(a);
+  return Array.prototype.map.call(a, function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+}
+
+function resetPallet() {
+  pallet = newPalletState();
+  $('commitPallet').disabled = true;
+  seenAt = {};
+  soundAt = {};
+  currentCode = '';
+  clearAlert();
+  $('pCarrier').textContent = '—';
+  $('pCarrier').style.color = '';
+  $('pCount').textContent = '0';
+  $('log').innerHTML = '';
+  cleared = true;
+  $('code').textContent = '—';
+  $('band').textContent = '待機中';
+  $('band').style.color = '';
+  $('readout').style.borderLeftColor = 'var(--line)';
+}
+
+function raiseAlert(level, title, detail) {
+  var warn = level === 'warn';
+  $('alertTitle').textContent = title;
+  $('alertDetail').textContent = detail;
+  $('alertMark').textContent = warn ? '!' : '×';
+  $('alert').classList.toggle('warn', warn);
+  $('alert').hidden = false;
+  document.body.classList.add('alerting');
+  document.body.classList.toggle('alerting-warn', warn);
+  alarm(level);
+}
+function clearAlert() {
+  $('alert').hidden = true;
+  document.body.classList.remove('alerting');
+  document.body.classList.remove('alerting-warn');
+}
+
+/* 同じラベルにカメラを向け続けている間は毎フレーム読めてしまう。
+   それを「二度読み」と数えると、読んだ直後に重複警報が出る。
+
+   間隔だけで見分けようとすると、手ブレやピント外れで読み取りが数秒途切れた時に
+   誤警報になる。そこで「最後に処理した番号と同じか」を主な判定材料にする。
+   間に別のラベルを読んでいれば、同じ番号が来た時点で確実に読み直しと分かる。
+   別のラベルを挟まずに長時間空いた場合の保険として、時間の上限も持たせる。 */
+var RESCAN_IDLE_MS = 10000;
+var seenAt = {}, currentCode = '';
+
+/* 同じ番号は10秒鳴らさない。番号ごとに最後に鳴らした時刻を持つ */
+var SOUND_COOLDOWN_MS = 10000;
+var soundAt = {};
+function shouldSound(code) {
+  var t = Date.now();
+  if (soundAt[code] && t - soundAt[code] < SOUND_COOLDOWN_MS) return false;
+  soundAt[code] = t;
+  return true;
+}
+
+/* 診断用。無言で失敗しないよう、起きたことを全部ここに溜める */
+var DIAG = {
+  supported: null,      /* 端末のデコーダが対応している形式 */
+  usedFormats: null,    /* 実際に要求した形式 */
+  settings: null,       /* 実際に取れた解像度など */
+  caps: null,
+  frames: 0,            /* デコードを試した回数 */
+  errs: 0,              /* 例外の回数 */
+  lastErr: '',
+  hits: 0,              /* 何かを読めた回数（受理前） */
+  lastRaw: '',
+  notes: []
+};
+var WIDE_FORMATS = ['codabar','code_128','code_39','itf','ean_13','ean_8','upc_a','upc_e','qr_code'];
+
+var ROI = { x: 0.06, y: 0.34, w: 0.88, h: 0.32 };
+/* 拡大は画素数を増やす＝そのぶん遅くなる。解像度を上げて枠を狭める方が速い。
+   1080p で読めない時だけ 2 に上げる（速度と引き換え） */
+var ROI_SCALE = 1;
+var roiCv = document.createElement('canvas');
+var roiCx = roiCv.getContext('2d', { willReadFrequently: true });
+
+function grabROI() {
+  var vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+
+  /* 枠は object-fit:cover で表示されている。つまり映像の一部だけが見えていて、
+     見えていない部分を切り出すと枠と実際の読取位置がズレる。
+     画面に見えている範囲を逆算してから、その中で枠の位置を取る。 */
+  var r = stage.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  var scale = Math.max(r.width / vw, r.height / vh);
+  var visW = r.width / scale, visH = r.height / scale;
+  var x0 = (vw - visW) / 2, y0 = (vh - visH) / 2;
+
+  var sx = Math.round(x0 + visW * ROI.x), sy = Math.round(y0 + visH * ROI.y);
+  var sw = Math.round(visW * ROI.w), sh = Math.round(visH * ROI.h);
+  var dw = sw * ROI_SCALE, dh = sh * ROI_SCALE;
+  if (roiCv.width !== dw || roiCv.height !== dh) { roiCv.width = dw; roiCv.height = dh; }
+  roiCx.imageSmoothingEnabled = true;
+  roiCx.imageSmoothingQuality = 'high';
+  roiCx.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh);
+  return roiCv;
+}
+
+$('newPallet').onclick = function () {
+  armAudio();
+  if (pallet.count && !confirm('このパレットの読み取り ' + pallet.count + ' 件を破棄しますか？\nシートには書き込みません')) return;
+  resetPallet();
+};
+$('commitPallet').onclick = function () {
+  armAudio();
+  if (!pallet.count || !pallet.carrier) return;
+  if (!confirm(pallet.carrier.name + ' / ' + pallet.count + ' 件でパレットを確定しますか？')) return;
+  /* 先に送信待ちに積んでから画面を空にする。通信を待たずに次のパレットへ進めるように。
+     送れなかった分は端末に残り、次の確定・ログイン・通信復帰の時に送り直す */
+  outbox.push({
+    clientId: pallet.clientId,
+    cd: pallet.carrier.cd || '',
+    name: pallet.carrier.name,
+    items: pallet.items.slice()
+  });
+  saveOutbox();
+  resetPallet();
+  flushOutbox();
+};
+$('alertOk').onclick = function () {
+  clearAlert();
+  /* 警報中に読んだ番号をそのまま残すと、解除直後に同じものを読んで鳴り続ける */
+  lastCode = ''; pending = ''; pendingN = 0;
+};
+
+async function loopNative(det) {
+  while (running) {
+    var roi = grabROI();
+    if (!roi) { await new Promise(function (r) { requestAnimationFrame(r); }); continue; }
+    var t0 = performance.now();
+    var codes = [];
+    DIAG.frames++;
+    try {
+      codes = await det.detect(roi);
+    } catch (e) {
+      DIAG.errs++; DIAG.lastErr = e.name + ': ' + (e.message || '');
+    }
+    if (codes.length) { DIAG.hits++; DIAG.lastRaw = codes[0].rawValue; }
+    var decodeMs = performance.now() - t0;
+
+    frames++;
+    var el = performance.now() - fpsT0;
+    if (el > 1000) {
+      $('mFps').textContent = (frames * 1000 / el).toFixed(1);
+      frames = 0; fpsT0 = performance.now();
+    }
+    $('mDecode').textContent = decodeMs.toFixed(1);
+
+    /* 枠内に複数写り込んだ時は、枠の中心に一番近いものを採る */
+    if (codes.length) {
+      var pick = codes[0];
+      if (codes.length > 1) {
+        var cx = roi.width / 2;
+        pick = codes.slice().sort(function (a, b) {
+          return Math.abs(a.boundingBox.x + a.boundingBox.width / 2 - cx)
+               - Math.abs(b.boundingBox.x + b.boundingBox.width / 2 - cx);
+        })[0];
+      }
+      if (confirmed(pick.rawValue)) handle(pick.rawValue, decodeMs, pick.format);
+    }
+    await new Promise(function (r) { requestAnimationFrame(r); });
+  }
+}
+
+/* iPhone 用。ネイティブ側と同じく「枠を切り出して1フレームずつ渡す」経路に揃える。
+   decodeFromVideoElement は内部で全画面を読むので、枠で絞る今回の作りでは使えない */
+/* ===== WebAssembly版デコーダの読み込み =====
+   iPhoneで動いているZXingはJavaScript実装で、画質が落ちると諦めが早い。
+   同じZXingのC++版をWebAssemblyにしたものは速く、ボケやコントラスト不足に強い。
+   読み込めた時だけ使い、失敗したら従来のJavaScript版のまま動かす。
+   本番中に壊れないよう、差し替えは「成功したら」の一方向にしかしない。 */
+var wasmZX = null, wasmFails = 0;
+/* 形式名は zxing-wasm の綴りに合わせる（ZXingのJS版とは別表記） */
+var WASM_FMT = { codabar: 'Codabar', ean_13: 'EAN-13', ean_8: 'EAN-8', code_128: 'Code128', code_39: 'Code39', itf: 'ITF' };
+
+(function loadWasm() {
+  /* バージョンは固定する。js側とwasm側がずれると動かない */
+  var BASE = 'https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.4/dist/';
+  import(BASE + 'es/reader/index.js').then(function (m) {
+    if (typeof m.readBarcodes !== 'function') throw new Error('readBarcodes が無い');
+
+    /* wasm本体の場所を明示する。CDN越しだと自動解決が外れることがある */
+    if (typeof m.prepareZXingModule === 'function') {
+      m.prepareZXingModule({
+        overrides: {
+          locateFile: function (path, prefix) {
+            return /\.wasm$/.test(path) ? BASE + 'reader/zxing_reader.wasm' : prefix + path;
+          }
+        }
+      });
+    }
+
+    /* 1x1の画像で一度呼び、wasmの取得と初期化まで済ませてから切り替える。
+       初回呼び出しは時間が掛かるので、スキャン中に起こすと取りこぼす */
+    return m.readBarcodes(new ImageData(new Uint8ClampedArray(4), 1, 1), { formats: ['Codabar'] })
+      .then(function () {
+        wasmZX = m;
+        DIAG.notes.push('zxing-wasm 読込成功');
+        if (running) showEngine();
+      });
+  }).catch(function (e) {
+    DIAG.notes.push('zxing-wasm 読込失敗: ' + (e && e.message ? e.message : e));
+  });
+})();
+
+function loopZXing() {
+  var hints = new Map();
+  hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+  var fmtMap = { codabar: 'CODABAR', ean_13: 'EAN_13', code_128: 'CODE_128', code_39: 'CODE_39', itf: 'ITF' };
+  var want = FORMATS.map(function (f) { return ZXing.BarcodeFormat[fmtMap[f]]; })
+                    .filter(function (v) { return v !== undefined; });
+  if (want.length) hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, want);
+  reader = new ZXing.BrowserMultiFormatReader(hints);
+  DIAG.usedFormats = FORMATS;
+
+  /* decodeFromCanvas が無い版だと毎フレーム例外で無言のまま終わる。
+     先に存在を確かめて、無ければ生のデコーダを直接叩く */
+  var viaCanvas = typeof reader.decodeFromCanvas === 'function';
+
+  function decodeJS(cv) {
+    if (viaCanvas) return reader.decodeFromCanvas(cv);
+    var lum = new ZXing.HTMLCanvasElementLuminanceSource(cv);
+    var bmp = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
+    return reader.decodeBitmap ? reader.decodeBitmap(bmp) : reader.decode(bmp);
+  }
+
+  var wasmOpts = {
+    formats: FORMATS.map(function (f) { return WASM_FMT[f]; }).filter(Boolean),
+    tryHarder: true,
+    tryRotate: true,       /* 縦向きのバーコードも拾う */
+    tryDownscale: true,    /* 大きく写っている時は縮小してからも試す */
+    maxNumberOfSymbols: 1
+  };
+
+  async function decodeWasm(cv) {
+    var img = roiCx.getImageData(0, 0, cv.width, cv.height);
+    var out = await wasmZX.readBarcodes(img, wasmOpts);
+    if (!out || !out.length) return null;
+    var r = out[0];
+    if (r.isValid === false) return null;
+    if (r.text) return r.text;
+    /* 版によっては text が無く bytes だけのことがある */
+    if (r.bytes && r.bytes.length) return String.fromCharCode.apply(null, r.bytes);
+    return null;
+  }
+
+  (async function tick() {
+    while (running) {
+      var roi = grabROI();
+      if (roi) {
+        var t0 = performance.now();
+        var text = null;
+        DIAG.frames++;
+
+        if (wasmZX) {
+          try {
+            text = await decodeWasm(roi);
+          } catch (e) {
+            /* 何度も失敗するようなら、黙って従来のデコーダに戻す */
+            if (++wasmFails >= 5) { wasmZX = null; DIAG.notes.push('zxing-wasm を停止: ' + e); showEngine(); }
+          }
+        } else {
+          /* 見つからない時も例外(NotFoundException)で来るので、それ以外だけ記録する */
+          try {
+            var result = decodeJS(roi);
+            if (result) text = result.getText();
+          } catch (e) {
+            if (e && e.name && e.name.indexOf('NotFound') < 0) {
+              DIAG.errs++; DIAG.lastErr = e.name + ': ' + (e.message || '');
+            }
+          }
+        }
+
+        if (text) { DIAG.hits++; DIAG.lastRaw = text; }
+        var ms = performance.now() - t0;
+
+        frames++;
+        var el = performance.now() - fpsT0;
+        if (el > 1000) {
+          $('mFps').textContent = (frames * 1000 / el).toFixed(1);
+          frames = 0; fpsT0 = performance.now();
+        }
+        $('mDecode').textContent = ms.toFixed(1);
+
+        if (text && confirmed(text)) handle(text, ms, 'codabar');
+      }
+      await new Promise(function (r) { requestAnimationFrame(r); });
+    }
+  })();
+}
+
+function handle(raw, decodeMs, format, skipFilter) {
+  var now = performance.now();
+  /* 同じコードの連打を1.5秒間は無視する。実運用では必須 */
+  if (raw === lastCode && now - lastCodeAt < 1500) return;
+
+  /* 枠がずれて別のバーコードを拾った場合はここで止める。
+     黙って無視すると「壊れてる」のか「弾いた」のか分からないので、理由を出す */
+  var chk = skipFilter ? { ok: true, digits: String(raw) } : accepted(raw);
+  $('fmt').textContent = '種別 ' + (format || '—') + ' / 生 ' + raw;
+  if (!chk.ok) {
+    lastCode = raw; lastCodeAt = now;
+    $('code').textContent = chk.digits || raw;
+    $('band').textContent = '対象外 — ' + chk.why;
+    $('band').style.color = 'var(--ink-2)';
+    $('readout').style.borderLeftColor = 'var(--ink-2)';
+    return;
+  }
+
+  var code = chk.digits;
+  var band = chk.carrier || judge(code);
+
+  /* カメラを向けたままなら、同じ番号が毎フレーム読める。
+     直前に処理したのと同じ番号なら、それは同じラベルを見続けているだけ */
+  var wall = Date.now();
+  if (code === currentCode && wall - (seenAt[code] || 0) < RESCAN_IDLE_MS) {
+    seenAt[code] = wall;
+    lastCode = raw; lastCodeAt = now;
+    return;
+  }
+  seenAt[code] = wall;
+  currentCode = code;
+
+  var gap = lastScanAt ? (now - lastScanAt) : 0;
+  lastCode = raw; lastCodeAt = now; lastScanAt = now;
+
+  $('code').textContent = code;
+  $('mGap').textContent = gap ? (gap / 1000).toFixed(2) : '—';
+
+  /* --- パレット照合 --- */
+  var verdict, vcolor;
+
+  if (pallet.seen[code]) {
+    /* 二度読み。積付けミスの兆候なので止める */
+    verdict = '同じ管理番号 — 読み取り済み';
+    vcolor = '#f0b300';
+    raiseAlert('warn', '同じ管理番号', code + ' はこのパレットで読み取り済みです（' + pallet.count + '件目まで計上済み）。件数には足していません');
+
+  } else if (!pallet.carrier) {
+    /* 1枚目。このパレットの運送会社が決まる */
+    pallet.carrier = band;
+    pallet.seen[code] = true;
+    pallet.items.push({ code: code, at: Date.now() });
+    pallet.count++;
+    $('commitPallet').disabled = false;
+    verdict = band.name + ' — このパレットの基準に設定';
+    vcolor = band.color;
+    $('pCarrier').textContent = band.name;
+    $('pCarrier').style.color = band.color || '';
+    $('pCount').textContent = pallet.count;
+    if (shouldSound(code)) beep();
+
+  } else if (band.name !== pallet.carrier.name) {
+    /* 混載。これが検出したかったもの */
+    verdict = '混載 — ' + band.name;
+    vcolor = '#d03a3a';
+    raiseAlert('danger', '運送会社が違う',
+      code + ' は「' + band.name + '」。このパレットは「' + pallet.carrier.name + '」です');
+
+  } else {
+    pallet.seen[code] = true;
+    pallet.items.push({ code: code, at: Date.now() });
+    pallet.count++;
+    verdict = band.name;
+    vcolor = band.color;
+    $('pCount').textContent = pallet.count;
+    if (shouldSound(code)) beep();
+  }
+
+  $('band').textContent = verdict;
+  $('band').style.color = vcolor || '';
+  $('readout').style.borderLeftColor = vcolor || 'var(--line)';
+
+  if (!cleared) { $('log').innerHTML = ''; cleared = true; }
+  var row = document.createElement('tr');
+  row.innerHTML =
+    '<td class="c">' + code + '</td>' +
+    '<td><span class="chip" style="--c:' + (vcolor || 'var(--ink-2)') + '">' + verdict + '</span></td>' +
+    '<td>' + (decodeMs ? decodeMs.toFixed(1) + ' ms' : '手入力') + '</td>' +
+    '<td>' + (gap ? (gap / 1000).toFixed(2) + ' s' : '—') + '</td>';
+  $('log').prepend(row);
+  while ($('log').children.length > 60) $('log').lastChild.remove();
+}
+
+$('start').onclick = start;
+$('stop').onclick = stop;
+$('manualBtn').onclick = function () {
+  var v = $('manual').value.trim();
+  /* 手入力もカメラと同じ経路を通す。警報の動作確認に使える */
+  if (v) { handle(v, 0, '手入力'); $('manual').value = ''; }
+};
+$('manual').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') $('manualBtn').click();
+});
+
+/* ===== スプレッドシート連携（Apps Script） =====
+   接続先URL・ログイン状態・送信待ちは端末の localStorage に置く。
+   URLはリポジトリに書かない（公開なので、書くと誰でも叩ける）。初回だけ画面で貼ってもらう。
+   パスワードは端末に残さない。ログインで受け取った期限付きのトークンだけを持つ。 */
+var KEY = { api: 'scan.api', token: 'scan.token', user: 'scan.user', master: 'scan.master', outbox: 'scan.outbox' };
+function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+function lsSet(k, v) { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {} }
+
+var outbox = [];
+try { outbox = JSON.parse(lsGet(KEY.outbox) || '[]') || []; } catch (e) { outbox = []; }
+function saveOutbox() { lsSet(KEY.outbox, JSON.stringify(outbox)); }
+
+/* text/plain で送る。application/json だとブラウザが事前確認を飛ばし、Apps Script は応答できない */
+function api(req) {
+  var url = lsGet(KEY.api);
+  if (!url) return Promise.reject(new Error('no_api'));
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(req)
+  }).then(function (r) {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  });
+}
+
+function validApi(u) {
+  return /^https:\/\/script\.google\.com\/(a\/[^/]+\/)?macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(u);
+}
+
+var LOGIN_MSG = {
+  bad_user: 'ユーザーIDは英数字で入力してください',
+  bad_login: 'ユーザーIDかパスワードが違います',
+  disabled: 'このIDは停止中です。管理者に連絡してください',
+  disabled_now: '5回続けて間違えたため、このIDを停止しました。管理者に連絡してください',
+  busy: '間違いが続いたため一時的に受け付けていません。しばらく待ってください',
+  no_api: '接続先URLを入れてください',
+  server: '受け口でエラーが起きました'
+};
+
+function showLogin(msg) {
+  if (running) stop();
+  $('login').hidden = false;
+  $('apiRow').hidden = !!lsGet(KEY.api);
+  $('lApiEdit').hidden = !lsGet(KEY.api);
+  $('lUser').value = lsGet(KEY.user) || $('lUser').value;
+  $('lPass').value = '';
+  $('lMsg').textContent = msg || '';
+  $('start').disabled = true;
+  (lsGet(KEY.api) ? ($('lUser').value ? $('lPass') : $('lUser')) : $('lApi')).focus();
+}
+
+function setMaster(list) {
+  CARRIERS = (list || []).map(function (c) {
+    if (!c.color) c.color = DEFAULT_COLOR;
+    return c;
+  });
+  lsSet(KEY.master, JSON.stringify(CARRIERS));
+  renderBands();
+}
+
+function enterApp(user) {
+  $('login').hidden = true;
+  $('who').hidden = false;
+  $('whoId').textContent = user;
+  $('start').disabled = running;
+  flushOutbox();
+}
+
+$('lApiEdit').onclick = function () {
+  $('apiRow').hidden = false;
+  $('lApi').value = lsGet(KEY.api) || '';
+  $('lApi').focus();
+};
+
+$('lGo').onclick = function () {
+  var apiUrl = $('lApi').value.trim();
+  if (!$('apiRow').hidden) {
+    if (!validApi(apiUrl)) { $('lMsg').textContent = 'URLは https://script.google.com/macros/s/…/exec の形です'; return; }
+    lsSet(KEY.api, apiUrl);
+  }
+  var user = $('lUser').value.trim();
+  var pass = $('lPass').value;
+  if (!user || !pass) { $('lMsg').textContent = 'ユーザーIDとパスワードを入れてください'; return; }
+
+  $('lGo').disabled = true;
+  $('lMsg').textContent = '';
+  $('lGo').textContent = '確認中…';
+  api({ action: 'login', user: user, pass: pass }).then(function (r) {
+    if (!r.ok) {
+      var m = LOGIN_MSG[r.error] || ('ログインできません（' + r.error + '）');
+      if (r.error === 'bad_login' && r.left) m += '（あと ' + r.left + ' 回で停止）';
+      $('lMsg').textContent = m;
+      $('lPass').value = '';
+      return;
+    }
+    $('lPass').value = '';
+    lsSet(KEY.token, r.token);
+    lsSet(KEY.user, r.user);
+    setMaster(r.master);
+    if (!CARRIERS.length) { $('lMsg').textContent = 'マスタ タブが空です'; return; }
+    enterApp(r.user);
+  }).catch(function (e) {
+    $('lMsg').textContent = e.message === 'no_api' ? LOGIN_MSG.no_api
+      : '接続できません。電波かURLを確認してください（' + e.message + '）';
+  }).then(function () {
+    $('lGo').disabled = false;
+    $('lGo').textContent = 'ログイン';
+  });
+};
+['lApi', 'lUser', 'lPass'].forEach(function (id) {
+  $(id).addEventListener('keydown', function (e) { if (e.key === 'Enter') $('lGo').click(); });
+});
+
+$('logout').onclick = function () {
+  if (pallet.count && !confirm('確定していない読み取りが ' + pallet.count + ' 件あります。ログアウトすると消えます')) return;
+  if (outbox.length && !confirm('未送信のパレットが ' + outbox.length + ' 枚あります。この端末に残し、次のログインで送ります')) return;
+  resetPallet();
+  lsSet(KEY.token, null);
+  lsSet(KEY.master, null);
+  CARRIERS = [];
+  renderBands();
+  $('who').hidden = true;
+  showLogin('');
+};
+
+/* ===== 送信待ちを送る =====
+   1枚ずつ順に送る。途中で失敗したら残りは端末に置いたまま次の機会を待つ。
+   同じ clientId を送り直しても、受け口が二重に書かないようにしてある */
+var flushing = false;
+function flushOutbox() {
+  showSendStat();
+  if (flushing || !outbox.length || !lsGet(KEY.token)) return;
+  flushing = true;
+  var item = outbox[0];
+  showSendStat('送信中…');
+  api({ action: 'commit', token: lsGet(KEY.token), clientId: item.clientId, cd: item.cd, name: item.name, items: item.items })
+    .then(function (r) {
+      flushing = false;
+      if (r.ok) {
+        outbox.shift();
+        saveOutbox();
+        showSendStat(r.pallet + ' を記録（' + r.count + '件）', 'good');
+        if (outbox.length) flushOutbox();
+        return;
+      }
+      if (r.error === 'auth') {
+        lsSet(KEY.token, null);
+        showLogin('ログインの期限が切れました。もう一度ログインしてください（未送信分は残っています）');
+        return;
+      }
+      showSendStat('送信できません（' + r.error + '）', 'bad');
+    })
+    .catch(function () {
+      flushing = false;
+      showSendStat('送信できません。電波が戻ったら送り直します', 'bad');
+    });
+}
+
+function showSendStat(msg, cls) {
+  var el = $('sendStat');
+  var rest = outbox.length ? '未送信 ' + outbox.length + ' 枚' : '';
+  if (!msg && !rest) { el.textContent = ''; el.className = 'sendstat'; return; }
+  el.className = 'sendstat' + (cls ? ' ' + cls : (rest ? ' bad' : ''));
+  el.textContent = [msg, rest].filter(Boolean).join(' ／ ');
+  if (rest && !flushing) {
+    var b = document.createElement('button');
+    b.textContent = '送り直す';
+    b.onclick = flushOutbox;
+    el.appendChild(b);
+  }
+}
+
+window.addEventListener('online', flushOutbox);
+
+/* 起動時。トークンが残っていれば、前回のマスタですぐ使える状態にしてから裏で最新を取りに行く */
+(function boot() {
+  /* 接続用QRから開いた時は、アドレスの # の後ろに接続先URLが付いてくる（#api=…）。
+     # より後ろはブラウザがサーバーへ送らないので、GitHub にも記録されない。
+     端末に保存したら、アドレスバーと履歴からは消しておく */
+  var m = /^#api=(.+)$/.exec(location.hash);
+  if (m) {
+    var fromQr = '';
+    try { fromQr = decodeURIComponent(m[1]); } catch (e) {}
+    if (validApi(fromQr)) {
+      if (fromQr !== lsGet(KEY.api)) lsSet(KEY.token, null);   /* 接続先が変わったら前のログインは無効 */
+      lsSet(KEY.api, fromQr);
+    }
+    history.replaceState(null, '', location.pathname + location.search);
+  }
+
+  var token = lsGet(KEY.token), user = lsGet(KEY.user);
+  var cached = null;
+  try { cached = JSON.parse(lsGet(KEY.master) || 'null'); } catch (e) {}
+  if (!token || !user || !lsGet(KEY.api)) { showLogin(''); return; }
+  if (cached && cached.length) { setMaster(cached); enterApp(user); }
+  api({ action: 'master', token: token }).then(function (r) {
+    if (r.ok) {
+      setMaster(r.master);
+      if (!cached || !cached.length) enterApp(user);
+    } else if (r.error === 'auth') {
+      lsSet(KEY.token, null);
+      showLogin('ログインの期限が切れました');
+    }
+  }).catch(function () {
+    /* 電波が無くても、前回のマスタがあればスキャンはできる。送信は後で */
+    if (!cached || !cached.length) showLogin('接続できません。電波を確認してください');
+  });
+})();
+</script>
+</body>
+</html>
