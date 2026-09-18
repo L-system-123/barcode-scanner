@@ -62,6 +62,7 @@ function doPost(e) {
       case 'master': return reply(withUser(req, function () { return { ok: true, master: readMaster() }; }));
       case 'commit': return reply(withUser(req, function (user) { return commit(req, user); }));
       case 'today':  return reply(withUser(req, function (user) { return today(req, user); }));
+      case 'ping':   return reply(withUser(req, function () { return { ok: true }; }));
       default:       return reply({ ok: false, error: 'bad_action' });
     }
   } catch (err) {
@@ -202,6 +203,7 @@ function login(req) {
     var props = PropertiesService.getScriptProperties();
     var token = Utilities.getUuid() + Utilities.getUuid();
     purgeTokens(props);
+    kickTokens(user);   // 同じIDで同時に使えるのは1台だけ。前の端末はここでログアウトさせる
     props.setProperty('tok:' + token, JSON.stringify({ user: user, exp: Date.now() + TOKEN_HOURS * 3600 * 1000 }));
     return { ok: true, token: token, user: user, hours: TOKEN_HOURS, master: readMaster() };
   } finally {
@@ -213,7 +215,11 @@ function login(req) {
    チェックを外した瞬間から、ログイン中の端末も止まる */
 function withUser(req, fn) {
   var raw = PropertiesService.getScriptProperties().getProperty('tok:' + String(req.token || ''));
-  if (!raw) return { ok: false, error: 'auth' };
+  if (!raw) {
+    /* 別の端末のログインで追い出されたのか、期限切れなのかを画面に伝え分ける */
+    var kicked = CacheService.getScriptCache().get('kicked:' + String(req.token || ''));
+    return { ok: false, error: kicked ? 'kicked' : 'auth' };
+  }
   var t = JSON.parse(raw);
   if (t.exp < Date.now()) return { ok: false, error: 'auth' };
   var u = findUser(usersSheet(), normUser(t.user));
@@ -227,6 +233,21 @@ function purgeTokens(props) {
     if (k.indexOf('tok:') !== 0) return;
     try { if (JSON.parse(all[k]).exp < now) props.deleteProperty(k); }
     catch (e) { props.deleteProperty(k); }
+  });
+}
+
+/* 同じユーザーの既存トークンを消し、「別の端末でログインされた」と分かる印を6時間残す */
+function kickTokens(user) {
+  var props = PropertiesService.getScriptProperties();
+  var cache = CacheService.getScriptCache();
+  var all = props.getProperties();
+  Object.keys(all).forEach(function (k) {
+    if (k.indexOf('tok:') !== 0) return;
+    try {
+      if (normUser(JSON.parse(all[k]).user) !== normUser(user)) return;
+    } catch (e) { /* 壊れたものは消すだけ */ }
+    props.deleteProperty(k);
+    cache.put('kicked:' + k.slice(4), '1', 21600);
   });
 }
 
