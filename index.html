@@ -162,6 +162,37 @@
   .empty { color: var(--ink-2); font-size: 13px; text-align: center; padding: 10px 0 4px; }
   .scroll:has(#log:not(:empty)) + .empty { display: none; }
 
+  /* ---- 今日のパレット ---- */
+  .cardhead { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .cardhead h2 { margin: 0 auto 0 0; }
+  .cardhead button { min-height: 34px; padding: 5px 12px; font-size: 12.5px; }
+  .toggle { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink-2); }
+  .toggle input { width: 18px; height: 18px; margin: 0; }
+  #todayMsg { font-size: 12.5px; color: var(--ink-2); }
+  #todayMsg:empty { display: none; }
+  #todayList:not(:empty) + .empty { display: none; }
+  details.pal { border-top: 1px solid var(--line); }
+  details.pal:first-child { border-top: 0; }
+  details.pal > summary {
+    list-style: none; cursor: pointer; padding: 10px 2px;
+    display: grid; grid-template-columns: 14px 1fr auto; gap: 2px 10px; align-items: center;
+  }
+  details.pal > summary::-webkit-details-marker { display: none; }
+  .pal .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--c, var(--ink-2)); filter: var(--chip-fx); }
+  .pal .pname { font-weight: 700; font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pal .pcount { font-family: "JetBrains Mono", monospace; font-weight: 700; font-size: 17px; text-align: right; }
+  .pal .pcount small { font-size: 11px; font-weight: 400; color: var(--ink-2); margin-left: 2px; }
+  .pal .psub { grid-column: 2 / 4; font-size: 12px; color: var(--ink-2); font-family: "JetBrains Mono", monospace; }
+  .pal .psub::before { content: "▸ "; }
+  details.pal[open] .psub::before { content: "▾ "; }
+  .pal.unsent .pname::after {
+    content: "未送信"; margin-left: 8px; font-size: 11px; font-weight: 700;
+    color: #fff; background: var(--signal); border-radius: 4px; padding: 1px 6px; vertical-align: 2px;
+  }
+  .pal table { margin: 0 0 10px; }
+  .pal td { padding: 5px 8px; }
+  .pal td:first-child { color: var(--ink-2); width: 2.5em; text-align: right; }
+
   /* ---- 詳細（管理者向け）。普段は閉じておく ---- */
   details.diag { padding: 0; }
   details.diag > summary {
@@ -461,6 +492,17 @@
       </table>
     </div>
     <div class="empty">まだ読み取っていません</div>
+  </section>
+
+  <section class="card">
+    <div class="cardhead">
+      <h2>今日のパレット</h2>
+      <label class="toggle"><input type="checkbox" id="todayAll">全員分</label>
+      <button id="todayReload">更新</button>
+    </div>
+    <div id="todayMsg"></div>
+    <div id="todayList"></div>
+    <div class="empty">今日確定したパレットはまだありません</div>
   </section>
 
   <!-- 現場の作業には要らない情報。調子が悪い時の確認用に折りたたんで残す -->
@@ -955,6 +997,7 @@ $('commitPallet').onclick = function () {
   });
   saveOutbox();
   resetPallet();
+  renderToday();   /* 送信を待たずに「未送信」として一覧に出す */
   flushOutbox();
 };
 $('alertOk').onclick = function () {
@@ -1301,6 +1344,7 @@ function enterApp(user) {
   $('whoId').textContent = user;
   $('start').disabled = running;
   flushOutbox();
+  loadToday();
 }
 
 $('lApiEdit').onclick = function () {
@@ -1356,6 +1400,8 @@ $('logout').onclick = function () {
   lsSet(KEY.master, null);
   CARRIERS = [];
   renderBands();
+  todayData = []; todayOpen = {};
+  renderToday();
   $('who').hidden = true;
   showLogin('');
 };
@@ -1378,6 +1424,7 @@ function flushOutbox() {
         saveOutbox();
         showSendStat(r.pallet + ' を記録（' + r.count + '件）', 'good');
         if (outbox.length) flushOutbox();
+        else loadToday();
         return;
       }
       if (r.error === 'auth') {
@@ -1408,6 +1455,109 @@ function showSendStat(msg, cls) {
 }
 
 window.addEventListener('online', flushOutbox);
+
+/* ===== 今日のパレット =====
+   シートの スキャン記録 から今日の分を受け取って並べる。押すと管理番号の一覧が開く。
+   まだ送れていないパレット（送信待ち）も「未送信」として上に出す。
+   社名はシートから来る文字なので、innerHTML ではなく textContent で入れる */
+var todayData = [], todayOpen = {};
+
+function loadToday() {
+  if (!lsGet(KEY.token)) return;
+  $('todayMsg').textContent = '読み込み中…';
+  api({ action: 'today', token: lsGet(KEY.token), all: $('todayAll').checked }).then(function (r) {
+    if (r.ok) {
+      todayData = r.pallets || [];
+      $('todayMsg').textContent = '';
+      renderToday();
+    } else if (r.error === 'auth') {
+      lsSet(KEY.token, null);
+      showLogin('ログインの期限が切れました');
+    } else {
+      $('todayMsg').textContent = '読み込めません（' + r.error + '）';
+    }
+  }).catch(function () {
+    $('todayMsg').textContent = '読み込めません。電波が戻ったら「更新」を押してください';
+    renderToday();
+  });
+}
+
+function hhmm(ms) {
+  if (!ms) return '—';
+  var t = new Date(ms);
+  return ('0' + t.getHours()).slice(-2) + ':' + ('0' + t.getMinutes()).slice(-2);
+}
+function hhmmss(ms) {
+  if (!ms) return '—';
+  var t = new Date(ms);
+  return hhmm(ms) + ':' + ('0' + t.getSeconds()).slice(-2);
+}
+function colorOf(p) {
+  for (var i = 0; i < CARRIERS.length; i++) {
+    var c = CARRIERS[i];
+    if (p.cd ? c.cd === p.cd : c.name === p.carrier) return c.color;
+  }
+  return '';
+}
+
+function renderToday() {
+  var host = $('todayList');
+  /* 開いていたものは、描き直しても開いたままにする */
+  Array.prototype.forEach.call(host.querySelectorAll('details.pal'), function (d) {
+    todayOpen[d.dataset.key] = d.open;
+  });
+  host.innerHTML = '';
+
+  var unsent = outbox.map(function (o) {
+    return { key: 'u:' + o.clientId, pallet: '', carrier: o.name, cd: o.cd, user: lsGet(KEY.user) || '', items: o.items, unsent: true };
+  }).reverse();
+  var sent = todayData.map(function (p) { p.key = p.pallet; return p; });
+
+  unsent.concat(sent).forEach(function (p) {
+    var times = p.items.map(function (it) { return it.at || 0; });
+    var lastAt = Math.max.apply(null, times.concat([0]));
+
+    var d = document.createElement('details');
+    d.className = 'pal' + (p.unsent ? ' unsent' : '');
+    d.dataset.key = p.key;
+    d.open = !!todayOpen[p.key];
+
+    var sm = document.createElement('summary');
+    var dot = document.createElement('span');
+    dot.className = 'dot';
+    var col = colorOf(p);
+    if (col) dot.style.setProperty('--c', col);
+    var name = document.createElement('span');
+    name.className = 'pname';
+    name.textContent = p.carrier || '—';
+    var cnt = document.createElement('span');
+    cnt.className = 'pcount';
+    cnt.textContent = p.items.length;
+    var unit = document.createElement('small');
+    unit.textContent = '件';
+    cnt.appendChild(unit);
+    var sub = document.createElement('span');
+    sub.className = 'psub';
+    var parts = [p.unsent ? '送信待ち' : p.pallet, hhmm(lastAt)];
+    if ($('todayAll').checked && p.user) parts.push(p.user);
+    sub.textContent = parts.join('  ・  ');
+    sm.appendChild(dot); sm.appendChild(name); sm.appendChild(cnt); sm.appendChild(sub);
+    d.appendChild(sm);
+
+    var tb = document.createElement('table');
+    p.items.forEach(function (it, i) {
+      var tr = tb.insertRow();
+      tr.insertCell().textContent = i + 1;
+      var c = tr.insertCell(); c.className = 'c'; c.textContent = it.code;
+      tr.insertCell().textContent = hhmmss(it.at);
+    });
+    d.appendChild(tb);
+    host.appendChild(d);
+  });
+}
+
+$('todayReload').onclick = loadToday;
+$('todayAll').onchange = function () { todayOpen = {}; loadToday(); };
 
 /* 起動時。トークンが残っていれば、前回のマスタですぐ使える状態にしてから裏で最新を取りに行く */
 (function boot() {

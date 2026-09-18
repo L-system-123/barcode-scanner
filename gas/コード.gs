@@ -61,6 +61,7 @@ function doPost(e) {
       case 'login':  return reply(login(req));
       case 'master': return reply(withUser(req, function () { return { ok: true, master: readMaster() }; }));
       case 'commit': return reply(withUser(req, function (user) { return commit(req, user); }));
+      case 'today':  return reply(withUser(req, function (user) { return today(req, user); }));
       default:       return reply({ ok: false, error: 'bad_action' });
     }
   } catch (err) {
@@ -323,6 +324,37 @@ function commit(req, user) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/* ===== 今日のパレット =====
+   スキャン記録は確定順に下へ追記されるので、今日の分は必ず末尾にまとまっている。
+   シート全体は読まず、末尾から最大 TODAY_MAX_ROWS 行だけ見る */
+var TODAY_MAX_ROWS = 5000;
+
+function today(req, user) {
+  var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_LOG);
+  var last = sh.getLastRow();
+  if (last < 2) return { ok: true, pallets: [] };
+  var n = Math.min(last - 1, TODAY_MAX_ROWS);
+  var vals = sh.getRange(last - n + 1, 1, n, LOG_HEADER.length).getValues();
+
+  var prefix = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd') + '-';
+  var me = normUser(user);
+  var byNo = {}, order = [];
+  vals.forEach(function (r) {
+    var no = String(r[0]);
+    if (no.indexOf(prefix) !== 0) return;
+    if (!req.all && normUser(r[5]) !== me) return;
+    var p = byNo[no];
+    if (!p) {
+      p = byNo[no] = { pallet: no, carrier: String(r[1]), cd: String(r[4]), user: String(r[5]), items: [] };
+      order.push(no);
+    }
+    var at = r[3] instanceof Date ? r[3].getTime() : null;
+    p.items.push({ code: String(r[2]), at: at });
+  });
+  /* 新しく確定したものを上に */
+  return { ok: true, pallets: order.reverse().map(function (no) { return byNo[no]; }) };
 }
 
 /* 再送判定用の記録は直近300件だけ残す。プロパティには容量上限がある */
