@@ -690,6 +690,7 @@ async function start() {
 
 
   running = true;
+  startWatch();
   stage.classList.add('scanning');
   $('start').disabled = true;
   $('stop').disabled = false;
@@ -781,7 +782,45 @@ async function start() {
   }
 }
 
+/* iPhone では confirm() のダイアログが出ると映像が一時停止し、閉じても止まったままになる。
+   （停止→開始しないと次を読めなかった原因）。ダイアログは必ずこれを通し、閉じた直後に映像を再開する。
+   ボタンを押した流れの中で play() するので、iOS の自動再生制限にもかからない */
+function ask(msg) {
+  var ok = confirm(msg);
+  wakeCamera();
+  return ok;
+}
+function wakeCamera() {
+  if (!running) return;
+  if (track && track.readyState === 'ended') { restartCamera(); return; }
+  if (video.paused) video.play().catch(function () {});
+}
+function restartCamera() {
+  DIAG.notes.push('映像が止まったのでカメラを開き直した ' + new Date().toLocaleTimeString());
+  stop();
+  start();
+}
+
+/* 保険: 映像が2秒進まなければ再生し直し、それでも止まっていればカメラを開き直す。
+   一度も進んだことが無い間は何もしない（currentTime が動かない環境で開き直しを繰り返さないため） */
+var watch = null;
+function startWatch() {
+  var lastT = -1, stuckAt = 0, moved = false, kicked = false;
+  clearInterval(watch);
+  watch = setInterval(function () {
+    if (!running || document.hidden) { stuckAt = 0; return; }
+    var t = video.currentTime;
+    if (t !== lastT) { if (lastT >= 0) moved = true; lastT = t; stuckAt = 0; kicked = false; return; }
+    if (!moved) return;
+    if (!stuckAt) { stuckAt = Date.now(); return; }
+    if (Date.now() - stuckAt < 2000) return;
+    if (!kicked) { kicked = true; stuckAt = Date.now(); video.play().catch(function () {}); return; }
+    restartCamera();
+  }, 500);
+}
+
 function stop() {
+  clearInterval(watch); watch = null;
   running = false;
   stage.classList.remove('scanning');
   if (reader) { try { reader.reset(); } catch (e) {} reader = null; }
@@ -1005,13 +1044,13 @@ function grabROI() {
 
 $('newPallet').onclick = function () {
   armAudio();
-  if (pallet.count && !confirm('このパレットの読み取り ' + pallet.count + ' 件を破棄しますか？\nシートには書き込みません')) return;
+  if (pallet.count && !ask('このパレットの読み取り ' + pallet.count + ' 件を破棄しますか？\nシートには書き込みません')) return;
   resetPallet();
 };
 $('commitPallet').onclick = function () {
   armAudio();
   if (!pallet.count || !pallet.carrier) return;
-  if (!confirm(pallet.carrier.name + ' / ' + pallet.count + ' 件でパレットを確定しますか？')) return;
+  if (!ask(pallet.carrier.name + ' / ' + pallet.count + ' 件でパレットを確定しますか？')) return;
   /* 先に送信待ちに積んでから画面を空にする。通信を待たずに次のパレットへ進めるように。
      送れなかった分は端末に残り、次の確定・ログイン・通信復帰の時に送り直す */
   outbox.push({
@@ -1307,7 +1346,7 @@ function handle(raw, decodeMs, format, skipFilter) {
    全部外したら運送会社も未決定に戻す */
 function removeCarton(code, row) {
   if (!pallet.seen[code]) return;
-  if (!confirm(code + ' をこのパレットから外しますか？')) return;
+  if (!ask(code + ' をこのパレットから外しますか？')) return;
   delete pallet.seen[code];
   pallet.items = pallet.items.filter(function (it) { return it.code !== code; });
   pallet.count = pallet.items.length;
@@ -1520,8 +1559,8 @@ $('lGo').onclick = function () {
 });
 
 $('logout').onclick = function () {
-  if (pallet.count && !confirm('確定していない読み取りが ' + pallet.count + ' 件あります。ログアウトすると消えます')) return;
-  if (outbox.length && !confirm('未送信のパレットが ' + outbox.length + ' 枚あります。この端末に残し、次のログインで送ります')) return;
+  if (pallet.count && !ask('確定していない読み取りが ' + pallet.count + ' 件あります。ログアウトすると消えます')) return;
+  if (outbox.length && !ask('未送信のパレットが ' + outbox.length + ' 枚あります。この端末に残し、次のログインで送ります')) return;
   resetPallet();
   lsSet(KEY.token, null);
   lsSet(KEY.master, null);
