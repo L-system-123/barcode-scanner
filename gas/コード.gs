@@ -13,8 +13,7 @@
  *        → タブ「スキャン記録」「マスタ」「ユーザー」ができ、メニュー「スキャン管理」が出る
  *   2. マスタ タブに仕分け表を貼る（マスタ.csv の中身）
  *   3. ユーザー タブに使う人を1行ずつ書く（A ユーザーID / C 有効 / D パスワード）
- *      D列はパスワードをそのまま書いてよい。本人が初めてログインに成功した時点で
- *      暗号化した文字列に自動で書き換わる。変える時も新しいパスワードを書き直すだけ
+ *      D列はパスワードをそのまま書く（暗号化はしない）。変える時も書き直すだけ
  *   4. デプロイ → 新しいデプロイ → 種類「ウェブアプリ」
  *        次のユーザーとして実行: 自分
  *        アクセスできるユーザー: 全員
@@ -25,10 +24,10 @@
  *   「新しいデプロイ」にすると URL が変わり、全端末で貼り直しになる。
  *
  * ■ パスワードの持ち方
- *   シートに手で書いた平文は、初回ログイン成功時に元に戻せない形（HMAC-SHA256）へ置き換える。
- *   平文のままだとシートの閲覧者に見えるため。書いてから初回ログインまでの間だけ平文が残る。
- *   計算に使う秘密の鍵は スクリプト プロパティ の PEPPER にある（初期設定で自動生成）。
- *   PEPPER を消したり変えたりすると全員のパスワードが通らなくなるので触らない。
+ *   シートに書いた平文のまま照合する（運用の手間を優先して暗号化はやめた）。
+ *   以前の版が暗号化した値（32桁$64桁の英数字）が残っていても、そのまま通る。
+ *   読めるようにしたければ、D列を平文のパスワードで書き直せばよい。
+ *   暗号化済みの値の照合には スクリプト プロパティ の PEPPER を使うので、それが残っている間は消さない。
  *
  * ■ スキャン記録の置き場所
  *   このシート（パスワードがある方）には置かない。現場管理者に見せる別のスプレッドシート
@@ -46,7 +45,7 @@ var SHEET_DETAIL = '明細';
 var PROP_LOG_ID = 'LOG_SHEET_ID';
 var LOG_HEADER = ['パレット番号', '運送会社名', 'カートン管理番号', 'スキャン日時', '配送CD', 'ユーザーID'];
 var MASTER_HEADER = ['上4桁', '中4桁から', '中4桁まで', '配送CD', '名称', 'CD要', '色'];
-var USERS_HEADER = ['ユーザーID', '名前', '有効', 'パスワード（初回ログインで暗号化）', '連続ミス', '最終ログイン', '備考'];
+var USERS_HEADER = ['ユーザーID', '名前', '有効', 'パスワード', '連続ミス', '最終ログイン', '備考'];
 /* ユーザー タブの列番号（1始まり） */
 var U_ID = 1, U_NAME = 2, U_ON = 3, U_HASH = 4, U_MISS = 5, U_LAST = 6, U_NOTE = 7;
 
@@ -157,11 +156,6 @@ function checkPass(stored, pass) {
   return sameText(hashPass(parts[0], pass), parts[1]);
 }
 
-function makeHash(pass) {
-  var salt = Utilities.getUuid().replace(/-/g, '');
-  return salt + '$' + hashPass(salt, pass);
-}
-
 /* ===== ログイン ===== */
 function login(req) {
   var user = normUser(req.user);
@@ -204,8 +198,6 @@ function login(req) {
     user = String(u.values[U_ID - 1]).trim();
     sh.getRange(u.row, U_MISS).setValue(0);
     sh.getRange(u.row, U_LAST).setValue(new Date());
-    /* 手で書かれた平文は、ここで暗号化した文字列に置き換える */
-    if (!isHashed(u.values[U_HASH - 1])) sh.getRange(u.row, U_HASH).setValue(makeHash(pass));
     /* パスワード欄を文字列扱いにする。数字だけのパスワードの先頭の0が消えないように */
     sh.getRange('D:D').setNumberFormat('@');
 
@@ -483,7 +475,7 @@ function setPasswordFromDialog(id, name, pass) {
   if (!user) throw new Error('ユーザーIDは英数字10文字までです');
   if (String(pass).length < 8) throw new Error('パスワードは8文字以上にしてください');
 
-  var stored = makeHash(pass);
+  var stored = pass;   // 平文のまま（冒頭の「パスワードの持ち方」参照）
 
   var lock = LockService.getScriptLock();
   lock.waitLock(15000);
