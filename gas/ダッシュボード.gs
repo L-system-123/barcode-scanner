@@ -51,6 +51,21 @@ function getStats(day) {
   return st;
 }
 
+/* 1パレット分の管理番号。運送会社別から開いた時に、その都度取りに来る（全パレット分を毎分送らないため）。
+   同じ日の重複は集計と同じく、先に出てきた方だけを数える */
+function getPallet(day, no) {
+  day = String(day || ''); no = String(no || '');
+  if (!/^\d{8}$/.test(day) || no.slice(0, 8) !== day) return [];
+  var seen = {}, items = [];
+  readLog().forEach(function (r) {
+    var p = String(r[0]), code = String(r[2]);
+    if (p.slice(0, 8) !== day || seen[code]) return;
+    seen[code] = true;
+    if (p === no) items.push({ code: code, at: r[3] instanceof Date ? r[3].getTime() : 0 });
+  });
+  return items;
+}
+
 function csvOf(day) {
   if (!/^\d{8}$/.test(day)) return ContentService.createTextOutput('bad date').setMimeType(ContentService.MimeType.TEXT);
   var seen = {};
@@ -123,9 +138,10 @@ function buildStats(rows, day, today) {
     if (at && (!u.first || at < u.first)) u.first = at;
     if (at > u.last) u.last = at;
 
-    var c = carriers[carrier] || (carriers[carrier] = { name: carrier, pallets: {}, boxes: 0 });
+    var c = carriers[carrier] || (carriers[carrier] = { name: carrier, cd: String(r[4]), pallets: {}, boxes: 0, last: 0 });
     c.boxes++;
     c.pallets[no] = true;
+    if (at > c.last) c.last = at;
   });
 
   /* パレットの確定時刻は、最後に読んだ箱の時刻で代用する（シートに確定時刻の列が無いため） */
@@ -150,7 +166,12 @@ function buildStats(rows, day, today) {
 
   var carrierList = Object.keys(carriers).map(function (k) {
     var c = carriers[k];
-    return { name: c.name, pallets: Object.keys(c.pallets).length, boxes: c.boxes };
+    var list = Object.keys(c.pallets).map(function (no) {
+      var p = pallets[no];
+      return { pallet: no, user: p.user, boxes: p.boxes, first: p.first, last: p.last };
+    }).sort(function (a, b) { return b.last - a.last; });
+    return { name: c.name, cd: c.cd, pallets: list.length, boxes: c.boxes, last: c.last,
+             share: boxes ? c.boxes / boxes : 0, avg: list.length ? c.boxes / list.length : 0, list: list };
   }).sort(function (a, b) { return b.boxes - a.boxes; });
 
   var recent = palletList.slice().sort(function (a, b) { return b.last - a.last; }).slice(0, 10);
@@ -228,11 +249,20 @@ var PAGE = `<!doctype html>
   .inbar span { min-width: 3.2em; text-align: right; }
   .empty { color: var(--ink-3); font-size: 14px; padding: 18px 0; text-align: center; }
   .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px; }
-  tr.pal { cursor: pointer; }
-  tr.pal:hover td { background: rgba(255,255,255,.05); }
-  tr.pal:focus-visible { outline: 2px solid var(--bar); outline-offset: -2px; }
+  tr.row { cursor: pointer; }
+  tr.row:hover > td { background: rgba(255,255,255,.05); }
+  tr.row:focus-visible { outline: 2px solid var(--bar); outline-offset: -2px; }
+  tr.car td { padding-top: 10px; padding-bottom: 10px; }
+  tr.car td.strong { font-size: 15px; }
+  .strong { font-weight: 700; }
+  tr.sub > td { padding: 0 8px 12px; border-bottom: 1px solid var(--line); }
+  table.pals { background: rgba(0,0,0,.14); border-radius: 8px; }
+  table.pals th { padding-top: 8px; }
+  .card h2 small { font-weight: 400; letter-spacing: 0; color: var(--ink-3); margin-left: 8px; font-size: 12px; }
+  .wait { color: var(--ink-3); font-size: 13px; }
+  @media (max-width: 600px) { .opt { display: none; } .codes { grid-template-columns: 1fr; } }
   td.tw { width: 1.2em; padding-right: 0; color: var(--ink-2); }
-  tr.pal.open td { border-bottom-color: transparent; }
+  tr.row.open > td { border-bottom-color: transparent; }
   tr.items td { padding-top: 0; white-space: normal; }
   .codes { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 4px 18px; padding: 2px 0 8px; }
   .codes span { display: flex; align-items: baseline; gap: 10px; }
@@ -260,23 +290,23 @@ var PAGE = `<!doctype html>
     <h2>時間帯別の箱数</h2>
     <div class="chart" id="chart"></div>
   </section>
+  <section class="card wide">
+    <h2>運送会社別 <small>押すとパレットごとの箱数、パレットを押すと管理番号</small></h2>
+    <div class="scroll" id="carriers"></div>
+  </section>
   <section class="card">
     <h2>担当者別</h2>
     <div class="scroll" id="users"></div>
   </section>
   <section class="card">
-    <h2>運送会社別</h2>
-    <div class="scroll" id="carriers"></div>
-  </section>
-  <section class="card wide">
-    <h2>直近のパレット</h2>
+    <h2>直近のパレット <small>押すと管理番号</small></h2>
     <div class="scroll" id="recent"></div>
   </section>
 </main>
 <script>
 var REFRESH_MS = 60000;
 var $ = function (id) { return document.getElementById(id); };
-var current = '', loading = false, lastOk = 0, lastSt = null, openPal = {};
+var current = '', loading = false, lastOk = 0, lastSt = null, openRow = {}, palItems = {}, palWait = {};
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -336,36 +366,78 @@ function render(st) {
         '<td class="r num">' + hm(u.first) + '</td><td class="r num">' + hm(u.last) + '</td></tr>';
     }).join('') + '</tbody></table>' : '<div class="empty">この日の記録はありません</div>';
 
+  /* 直近のパレットは管理番号も一緒に届くので、取りに行かずに使う */
+  st.recent.forEach(function (p) { if (p.items) palItems[p.pallet] = p.items; });
+
   var maxC = Math.max.apply(null, st.carriers.map(function (c) { return c.boxes; }).concat([1]));
-  $('carriers').innerHTML = st.carriers.length ? '<table><thead><tr><th>運送会社</th><th class="r">パレット</th><th>箱</th></tr></thead><tbody>' +
+  $('carriers').innerHTML = st.carriers.length ? '<table><thead><tr><th></th><th>運送会社</th><th class="r">パレット</th><th>箱</th><th class="r">箱/パレット</th><th class="r opt">割合</th><th class="opt">配送CD</th><th class="r opt">最後のスキャン</th></tr></thead><tbody>' +
     st.carriers.map(function (c) {
-      return '<tr><td class="name">' + esc(c.name) + '</td><td class="r num">' + n(c.pallets) + '</td><td>' + inbar(c.boxes, maxC) + '</td></tr>';
+      var key = 'c|' + c.name, open = !!openRow[key];
+      return '<tr class="row car' + (open ? ' open' : '') + '" data-k="' + esc(key) + '" tabindex="0" aria-expanded="' + open + '">' +
+        '<td class="tw">' + (open ? '▾' : '▸') + '</td><td class="name strong">' + esc(c.name) + '</td>' +
+        '<td class="r num">' + n(c.pallets) + '</td><td>' + inbar(c.boxes, maxC) + '</td><td class="r num">' + c.avg.toFixed(1) + '</td>' +
+        '<td class="r num opt">' + Math.round(c.share * 100) + '%</td><td class="num opt">' + esc(c.cd || '—') + '</td><td class="r num opt">' + hm(c.last) + '</td></tr>' +
+        '<tr class="sub"' + (open ? '' : ' hidden') + '><td></td><td colspan="7">' + palletTable(c.list, 'c', false) + '</td></tr>';
     }).join('') + '</tbody></table>' : '<div class="empty">この日の記録はありません</div>';
 
-  /* 行を押すと、そのパレットの管理番号の一覧が下に開く。開いた状態は自動更新をまたいで保つ */
-  $('recent').innerHTML = st.recent.length ? '<table><thead><tr><th></th><th>最後のスキャン</th><th>パレット番号</th><th>運送会社</th><th>担当</th><th class="r">箱</th></tr></thead><tbody>' +
-    st.recent.map(function (p) {
-      var open = !!openPal[p.pallet];
-      return '<tr class="pal' + (open ? ' open' : '') + '" data-p="' + esc(p.pallet) + '" tabindex="0" aria-expanded="' + open + '">' +
-        '<td class="tw">' + (open ? '▾' : '▸') + '</td><td class="num">' + hm(p.last) + '</td><td class="mono">' + esc(p.pallet) + '</td><td class="name">' + esc(p.carrier) + '</td>' +
-        '<td>' + esc(p.user) + '</td><td class="r num">' + n(p.boxes) + '</td></tr>' +
-        '<tr class="items"' + (open ? '' : ' hidden') + '><td></td><td colspan="5"><div class="codes">' +
-        (p.items || []).map(function (it, i) {
-          return '<span><em class="num">' + (i + 1) + '</em><b class="mono">' + esc(it.code) + '</b><small class="num">' + hms(it.at) + '</small></span>';
-        }).join('') + '</div></td></tr>';
-    }).join('') + '</tbody></table>' : '<div class="empty">この日の記録はありません</div>';
-  Array.prototype.forEach.call($('recent').querySelectorAll('tr.pal'), function (tr) {
-    var toggle = function () {
-      var open = !openPal[tr.dataset.p];
-      if (open) openPal[tr.dataset.p] = true; else delete openPal[tr.dataset.p];
-      tr.classList.toggle('open', open);
-      tr.setAttribute('aria-expanded', open);
-      tr.nextElementSibling.hidden = !open;
-      tr.firstChild.textContent = open ? '▾' : '▸';
-    };
-    tr.addEventListener('click', toggle);
-    tr.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  $('recent').innerHTML = st.recent.length ? palletTable(st.recent, 'r', true) : '<div class="empty">この日の記録はありません</div>';
+
+  Array.prototype.forEach.call(document.querySelectorAll('tr.row'), function (tr) {
+    tr.addEventListener('click', function () { toggleRow(tr); });
+    tr.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleRow(tr); } });
   });
+  /* 開いたままのパレットで、管理番号がまだ手元に無いものは取りに行く */
+  Array.prototype.forEach.call(document.querySelectorAll('tr.pal.open'), function (tr) { fillCodes(tr.dataset.p); });
+}
+
+/* パレットの表。押すと管理番号の一覧が開く。withCarrier: 運送会社の列を出すか */
+function palletTable(list, scope, withCarrier) {
+  return '<table class="pals"><thead><tr><th></th><th>パレット番号</th><th class="r">箱</th><th>担当</th>' + (withCarrier ? '<th>運送会社</th>' : '') +
+    '<th class="r opt">最後のスキャン</th></tr></thead><tbody>' +
+    list.map(function (p) {
+      var key = scope + 'p|' + p.pallet, open = !!openRow[key];
+      return '<tr class="row pal' + (open ? ' open' : '') + '" data-k="' + esc(key) + '" data-p="' + esc(p.pallet) + '" tabindex="0" aria-expanded="' + open + '">' +
+        '<td class="tw">' + (open ? '▾' : '▸') + '</td><td class="mono">' + esc(p.pallet) + '</td><td class="r num strong">' + n(p.boxes) + '</td>' +
+        '<td>' + esc(p.user) + '</td>' + (withCarrier ? '<td class="name">' + esc(p.carrier) + '</td>' : '') +
+        '<td class="r num opt">' + hm(p.last) + '</td></tr>' +
+        '<tr class="items"' + (open ? '' : ' hidden') + '><td></td><td colspan="' + (withCarrier ? 5 : 4) + '"><div class="codes" data-p="' + esc(p.pallet) + '">' +
+        codesHtml(p.pallet) + '</div></td></tr>';
+    }).join('') + '</tbody></table>';
+}
+
+function codesHtml(no) {
+  var items = palItems[no];
+  if (!items) return '<span class="wait">読み込み中…</span>';
+  if (!items.length) return '<span class="wait">管理番号がありません</span>';
+  return items.map(function (it, i) {
+    return '<span><em class="num">' + (i + 1) + '</em><b class="mono">' + esc(it.code) + '</b><small class="num">' + hms(it.at) + '</small></span>';
+  }).join('');
+}
+
+/* 開いたパレットの管理番号を、まだ無ければ取りに行って、同じパレットの欄を全部埋める */
+function fillCodes(no) {
+  if (!no || palItems[no] || palWait[no]) return;
+  palWait[no] = true;
+  google.script.run
+    .withSuccessHandler(function (items) {
+      delete palWait[no];
+      palItems[no] = items || [];
+      Array.prototype.forEach.call(document.querySelectorAll('.codes'), function (el) {
+        if (el.dataset.p === no) el.innerHTML = codesHtml(no);
+      });
+    })
+    .withFailureHandler(function () { delete palWait[no]; })
+    .getPallet(current, no);
+}
+
+function toggleRow(tr) {
+  var key = tr.dataset.k, open = !openRow[key];
+  if (open) openRow[key] = true; else delete openRow[key];
+  tr.classList.toggle('open', open);
+  tr.setAttribute('aria-expanded', open);
+  tr.nextElementSibling.hidden = !open;
+  tr.firstChild.textContent = open ? '▾' : '▸';
+  if (open && tr.dataset.p) fillCodes(tr.dataset.p);
 }
 function hms(ms) {
   if (!ms) return '—';
@@ -428,7 +500,7 @@ function niceStep(max) {
   return Math.max(1, (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p);
 }
 
-$('day').onchange = function () { current = this.value; lastSt = null; openPal = {}; load(); };
+$('day').onchange = function () { current = this.value; lastSt = null; openRow = {}; palItems = {}; load(); };
 /* 自動更新は今日を見ている時だけ。過去の日は数字が変わらないので取りに行かない */
 setInterval(function () {
   if (!document.hidden && (!lastSt || lastSt.isToday)) load();
