@@ -1649,8 +1649,10 @@ function flushOutbox() {
             sk.length + ' 箱は先に別のパレットで確定されていたため、' + (r.count ? r.pallet + ' には入れていません' : 'このパレットは記録していません') + '。\n' +
             sk.map(function (s) { return s.code + ' → ' + s.pallet + '（' + s.user + '）'; }).join('\n'));
         }
+        if (r.codes) applyDone(r.codes);
+        else loadDone();   /* 古い受け口は一覧を返さない */
         if (outbox.length) flushOutbox();
-        else { loadToday(); loadDone(); }
+        else loadToday();
         return;
       }
       if (r.error === 'auth') {
@@ -1709,7 +1711,7 @@ function loadToday() {
 }
 
 /* ===== 今日確定済みの箱（全員分） =====
-   読んだ瞬間に「スキャン済み」と出すための一覧。ログイン時・確定のたび・30秒ごとに取り直す。
+   読んだ瞬間に「スキャン済み」と出すための一覧。ログイン時・確定の返事・60秒ごと・画面に戻った時に最新にする。
    未送信のパレットの箱も入れておく（送れるまでシートには無いため） */
 var doneCodes = {}, doneBusy = false, doneAgain = false;
 function loadDone() {
@@ -1717,21 +1719,25 @@ function loadDone() {
   if (doneBusy) { doneAgain = true; return; }   /* 取り直し中に頼まれたら、終わってからもう一度 */
   doneBusy = true;
   api({ action: 'done', token: lsGet(KEY.token) }).then(function (r) {
-    if (!r.ok) return;
-    var m = {};
-    (r.codes || []).forEach(function (c) { m[c[0]] = { pallet: c[1], user: c[2] }; });
-    /* シートの一覧が届く前に送れた分（手元ではパレット番号が分かっている）は残す */
-    Object.keys(doneCodes).forEach(function (k) { if (!m[k] && doneCodes[k].pallet) m[k] = doneCodes[k]; });
-    outbox.forEach(function (o) {
-      o.items.forEach(function (it) { if (!m[it.code]) m[it.code] = { pallet: '', user: lsGet(KEY.user) || '' }; });
-    });
-    doneCodes = m;
+    if (r.ok) applyDone(r.codes);
   }).catch(function () {}).then(function () {
     doneBusy = false;
     if (doneAgain) { doneAgain = false; loadDone(); }
   });
 }
-setInterval(function () { if (!document.hidden) loadDone(); }, 30000);
+/* 一覧を差し替える。確定の返事にも同じ一覧が入ってくるので、そちらからも呼ぶ */
+function applyDone(codes) {
+  var m = {};
+  (codes || []).forEach(function (c) { m[c[0]] = { pallet: c[1], user: c[2] }; });
+  /* シートの一覧が届く前に送れた分（手元ではパレット番号が分かっている）は残す */
+  Object.keys(doneCodes).forEach(function (k) { if (!m[k] && doneCodes[k].pallet) m[k] = doneCodes[k]; });
+  outbox.forEach(function (o) {
+    o.items.forEach(function (it) { if (!m[it.code]) m[it.code] = { pallet: '', user: lsGet(KEY.user) || '' }; });
+  });
+  doneCodes = m;
+}
+/* 定期の取り直しは60秒ごと。自分が確定した時は確定の返事で最新になるので、呼び出しは増やさない */
+setInterval(function () { if (!document.hidden) loadDone(); }, 60000);
 document.addEventListener('visibilitychange', function () { if (!document.hidden) loadDone(); });
 
 function hhmm(ms) {

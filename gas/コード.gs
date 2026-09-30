@@ -323,7 +323,7 @@ function commit(req, user) {
   try {
     var props = PropertiesService.getScriptProperties();
     var done = props.getProperty('done:' + clientId);
-    if (done) return { ok: true, pallet: done, count: rows.length, duplicate: true };
+    if (done) return { ok: true, pallet: done, count: rows.length, duplicate: true, codes: codeList(todayCodeMap(logSheet())) };
 
     var sh = logSheet();
     var prefix = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd') + '-' + user + '-';
@@ -345,7 +345,7 @@ function commit(req, user) {
       return true;
     });
     /* 全部確定済みだった時はパレット番号を振らない。再送されても同じ判定になるので done: も残さない */
-    if (!rows.length) return { ok: true, pallet: '', count: 0, skipped: skipped };
+    if (!rows.length) return { ok: true, pallet: '', count: 0, skipped: skipped, codes: codeList(already) };
 
     var palletNo = prefix + ('000' + (seq + 1)).slice(-3);
 
@@ -357,7 +357,9 @@ function commit(req, user) {
 
     props.setProperty('done:' + clientId, palletNo);
     purgeDone(props);
-    return { ok: true, pallet: palletNo, count: out.length, skipped: skipped };
+    /* 画面の「スキャン済み」一覧を、別に取りに来させずこの返事で更新する（呼び出し回数を増やさないため） */
+    out.forEach(function (r) { if (!already[r[2]]) already[r[2]] = { pallet: palletNo, user: user }; });
+    return { ok: true, pallet: palletNo, count: out.length, skipped: skipped, codes: codeList(already) };
   } finally {
     lock.releaseLock();
   }
@@ -383,8 +385,10 @@ function todayCodeMap(sh) {
 
 /* 画面側の「スキャン済み」判定用。全員分を [管理番号, パレット番号, ユーザー] の並びで返す */
 function doneToday() {
-  var map = todayCodeMap(logSheet());
-  return { ok: true, codes: Object.keys(map).map(function (c) { return [c, map[c].pallet, map[c].user]; }) };
+  return { ok: true, codes: codeList(todayCodeMap(logSheet())) };
+}
+function codeList(map) {
+  return Object.keys(map).map(function (c) { return [c, map[c].pallet, map[c].user]; });
 }
 
 /* ===== 管理番号から探す =====
