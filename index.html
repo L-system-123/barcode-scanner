@@ -272,6 +272,19 @@
     @keyframes flash { 50% { background: var(--a-bg2); } }
   }
 
+  /* ---- 確認（confirm() の代わり。理由は JS の ask() を参照） ---- */
+  .ask {
+    position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.55);
+    display: grid; place-items: center; padding: 20px;
+  }
+  .askbox {
+    background: var(--panel); color: var(--ink); border-radius: 10px; box-shadow: var(--shadow);
+    padding: 20px; width: 100%; max-width: 380px;
+  }
+  .askbox p { margin: 0 0 18px; font-size: 16px; line-height: 1.6; white-space: pre-line; word-break: break-all; }
+  .askbtns { display: flex; gap: 10px; }
+  .askbtns button { flex: 1 1 0; }
+
   .reticle::before, .reticle::after {
     content: ""; position: absolute; left: -1px; right: -1px; height: 14px;
     border-left: 2px solid var(--signal); border-right: 2px solid var(--signal);
@@ -463,6 +476,16 @@
       <h2 id="alertTitle">—</h2>
       <p id="alertDetail"></p>
       <button id="alertOk">確認した</button>
+    </div>
+  </div>
+
+  <div class="ask" id="ask" hidden role="dialog" aria-modal="true" aria-labelledby="askMsg">
+    <div class="askbox">
+      <p id="askMsg"></p>
+      <div class="askbtns">
+        <button id="askNo">やめる</button>
+        <button id="askYes" class="go">OK</button>
+      </div>
     </div>
   </div>
 
@@ -782,18 +805,28 @@ async function start() {
   }
 }
 
-/* iPhone では confirm() のダイアログが出ると映像が一時停止し、閉じても止まったままになる。
-   （停止→開始しないと次を読めなかった原因）。ダイアログは必ずこれを通し、閉じた直後に映像を再開する。
-   ボタンを押した流れの中で play() するので、iOS の自動再生制限にもかからない */
-function ask(msg) {
-  var ok = confirm(msg);
-  wakeCamera();
-  return ok;
-}
-function wakeCamera() {
-  if (!running) return;
-  if (track && track.readyState === 'ended') { restartCamera(); return; }
-  if (video.paused) video.play().catch(function () {});
+/* 確認は画面内の枠で出す。ブラウザの confirm() は使わない:
+     - iPhone では出ている間カメラ映像が止まり、閉じても止まったままになる
+     - 「ダイアログを表示しない」を選ばれると以後すべてキャンセル扱いになり、ボタンが効かなくなる
+   結果は Promise で返す。出ている間は読み取りを受け付けない（確認した件数とずれないように） */
+var asking = false;
+function ask(msg, yes) {
+  if (asking) return Promise.resolve(false);
+  asking = true;
+  $('askMsg').textContent = msg;
+  $('askYes').textContent = yes || 'OK';
+  $('ask').hidden = false;
+  $('askYes').focus();
+  return new Promise(function (done) {
+    function close(ok) {
+      $('ask').hidden = true;
+      $('askYes').onclick = $('askNo').onclick = null;
+      asking = false;
+      done(ok);
+    }
+    $('askYes').onclick = function () { close(true); };
+    $('askNo').onclick = function () { close(false); };
+  });
 }
 function restartCamera() {
   DIAG.notes.push('映像が止まったのでカメラを開き直した ' + new Date().toLocaleTimeString());
@@ -1042,15 +1075,16 @@ function grabROI() {
   return roiCv;
 }
 
-$('newPallet').onclick = function () {
+$('newPallet').onclick = async function () {
   armAudio();
-  if (pallet.count && !ask('このパレットの読み取り ' + pallet.count + ' 件を破棄しますか？\nシートには書き込みません')) return;
+  if (pallet.count && !await ask('このパレットの読み取り ' + pallet.count + ' 件を破棄しますか？\nシートには書き込みません', '破棄する')) return;
   resetPallet();
 };
-$('commitPallet').onclick = function () {
+$('commitPallet').onclick = async function () {
   armAudio();
   if (!pallet.count || !pallet.carrier) return;
-  if (!ask(pallet.carrier.name + ' / ' + pallet.count + ' 件でパレットを確定しますか？')) return;
+  if (!await ask(pallet.carrier.name + ' / ' + pallet.count + ' 件でパレットを確定しますか？', '確定する')) return;
+  if (!pallet.count || !pallet.carrier) return;
   /* 先に送信待ちに積んでから画面を空にする。通信を待たずに次のパレットへ進めるように。
      送れなかった分は端末に残り、次の確定・ログイン・通信復帰の時に送り直す */
   outbox.push({
@@ -1237,6 +1271,7 @@ function loopZXing() {
 }
 
 function handle(raw, decodeMs, format, skipFilter) {
+  if (asking) return;
   var now = performance.now();
   /* 同じコードの連打を1.5秒間は無視する。実運用では必須 */
   if (raw === lastCode && now - lastCodeAt < 1500) return;
@@ -1344,9 +1379,10 @@ function handle(raw, decodeMs, format, skipFilter) {
 /* ===== 1箱だけ取り消す =====
    確定前のパレットから、その1箱だけ外す。外した箱はもう一度読めば数え直せる。
    全部外したら運送会社も未決定に戻す */
-function removeCarton(code, row) {
+async function removeCarton(code, row) {
   if (!pallet.seen[code]) return;
-  if (!ask(code + ' をこのパレットから外しますか？')) return;
+  if (!await ask(code + ' をこのパレットから外しますか？', '外す')) return;
+  if (!pallet.seen[code]) return;
   delete pallet.seen[code];
   pallet.items = pallet.items.filter(function (it) { return it.code !== code; });
   pallet.count = pallet.items.length;
@@ -1558,9 +1594,9 @@ $('lGo').onclick = function () {
   $(id).addEventListener('keydown', function (e) { if (e.key === 'Enter') $('lGo').click(); });
 });
 
-$('logout').onclick = function () {
-  if (pallet.count && !ask('確定していない読み取りが ' + pallet.count + ' 件あります。ログアウトすると消えます')) return;
-  if (outbox.length && !ask('未送信のパレットが ' + outbox.length + ' 枚あります。この端末に残し、次のログインで送ります')) return;
+$('logout').onclick = async function () {
+  if (pallet.count && !await ask('確定していない読み取りが ' + pallet.count + ' 件あります。ログアウトすると消えます', 'ログアウト')) return;
+  if (outbox.length && !await ask('未送信のパレットが ' + outbox.length + ' 枚あります。この端末に残し、次のログインで送ります', 'ログアウト')) return;
   resetPallet();
   lsSet(KEY.token, null);
   lsSet(KEY.master, null);
