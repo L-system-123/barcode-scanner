@@ -265,7 +265,7 @@ var PAGE = `<!doctype html>
   col.c-tw { width: 28px; } col.c-cd { width: 104px; } col.c-name { width: 180px; } col.c-n { width: 96px; }
   col.c-t { width: 150px; } col.c-bar { width: 300px; }
   table.cars { width: auto; }
-  col.c-pal { width: 230px; } col.c-box { width: 64px; } col.c-user { width: 130px; } col.c-car { width: 120px; }
+  col.c-pal { width: 230px; } col.c-box { width: 76px; } col.c-user { width: 130px; } col.c-car { width: 120px; }
   table.pals { background: rgba(0,0,0,.14); border-radius: 8px; width: auto; }
   table.pals td.r, table.pals th.r { padding-right: 18px; }
   td.name, td.mono { overflow: hidden; text-overflow: ellipsis; }
@@ -375,7 +375,7 @@ function render(st) {
   drawChart(st.hourly);
 
   var maxU = Math.max.apply(null, st.users.map(function (u) { return u.boxes; }).concat([1]));
-  $('users').innerHTML = st.users.length ? '<table><thead><tr><th>担当</th><th class="r">パレット数</th><th>箱</th><th class="r">箱/時</th><th class="r">最初</th><th class="r">最後</th></tr></thead><tbody>' +
+  $('users').innerHTML = st.users.length ? '<table><thead><tr><th>担当</th><th class="r">パレット数</th><th>箱数</th><th class="r">箱/時</th><th class="r">最初</th><th class="r">最後</th></tr></thead><tbody>' +
     st.users.map(function (u) {
       return '<tr><td>' + esc(u.user) + '</td><td class="r num">' + n(u.pallets) + '</td>' +
         '<td>' + inbar(u.boxes, maxU) + '</td><td class="r num">' + (u.pace == null ? '—' : n(u.pace)) + '</td>' +
@@ -387,7 +387,7 @@ function render(st) {
 
   var maxC = Math.max.apply(null, st.carriers.map(function (c) { return c.boxes; }).concat([1]));
   $('carriers').innerHTML = st.carriers.length ? '<table class="cars"><colgroup><col class="c-tw"><col class="c-cd"><col class="c-name"><col class="c-n"><col class="c-bar"><col class="c-t opt"></colgroup>' +
-    '<thead><tr><th></th><th><span class="opt">運送会社</span>CD</th><th>運送会社</th><th class="r">パレット数</th><th>箱</th><th class="r opt">最後のパレット確定</th></tr></thead><tbody>' +
+    '<thead><tr><th></th><th><span class="opt">運送会社</span>CD</th><th>運送会社</th><th class="r">パレット数</th><th>箱数</th><th class="r opt">最後のパレット確定</th></tr></thead><tbody>' +
     st.carriers.map(function (c) {
       var key = 'c|' + c.name, open = !!openRow[key];
       return '<tr class="row car' + (open ? ' open' : '') + '" data-k="' + esc(key) + '" tabindex="0" aria-expanded="' + open + '">' +
@@ -410,7 +410,7 @@ function render(st) {
 /* パレットの表。押すと管理番号の一覧が開く。withCarrier: 運送会社の列を出すか */
 function palletTable(list, scope, withCarrier) {
   return '<table class="pals"><colgroup><col class="c-tw"><col class="c-pal"><col class="c-box"><col class="c-user">' + (withCarrier ? '<col class="c-car">' : '') + '<col class="c-t opt"></colgroup>' +
-    '<thead><tr><th></th><th>パレット番号</th><th class="r">箱</th><th>担当</th>' + (withCarrier ? '<th>運送会社</th>' : '') +
+    '<thead><tr><th></th><th>パレット番号</th><th class="r">箱数</th><th>担当</th>' + (withCarrier ? '<th>運送会社</th>' : '') +
     '<th class="r opt">パレット確定時刻</th></tr></thead><tbody>' +
     list.map(function (p) {
       var key = scope + 'p|' + p.pallet, open = !!openRow[key];
