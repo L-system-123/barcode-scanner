@@ -17,6 +17,11 @@
  *   ページを開くと、画面から google.script.run で getStats を呼んで数字だけ受け取り、描き直す。
  *   ページごと読み直すと GAS の入れ子 iframe が白画面になるので、自動更新も数字の取り直しで行う。
  *   同じ日の集計は30秒キャッシュする（何台で開いてもシートを読む回数を増やさないため）。
+ *
+ * ■ CSV
+ *   …/exec?csv=yyyyMMdd でその日のスキャン記録（1箱1行、同じ日の重複は除く）をCSVで返す。
+ *   Excelで文字化けしないよう BOM付きUTF-8。画面の「CSV」ボタンはこのURLを開くだけ
+ *   （画面は iframe の中なので、そこから直接ダウンロードさせるより確実なため）。
  */
 
 var SHEET_LOG = 'スキャン記録';
@@ -24,7 +29,9 @@ var TZ = 'Asia/Tokyo';
 var CACHE_SEC = 30;
 var DATE_LIST_MAX = 60;
 
-function doGet() {
+function doGet(e) {
+  var day = e && e.parameter && e.parameter.csv;
+  if (day) return csvOf(String(day));
   return HtmlService.createHtmlOutput(PAGE)
     .setTitle('パレットスキャン実績')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
@@ -42,6 +49,29 @@ function getStats(day) {
   var st = buildStats(readLog(), day, today);
   try { cache.put('st:' + day, JSON.stringify(st), CACHE_SEC); } catch (e) { /* 大きすぎる時は諦める */ }
   return st;
+}
+
+function csvOf(day) {
+  if (!/^\d{8}$/.test(day)) return ContentService.createTextOutput('bad date').setMimeType(ContentService.MimeType.TEXT);
+  var seen = {};
+  var lines = [['パレット番号', '運送会社名', 'カートン管理番号', 'スキャン日時', '配送CD', 'ユーザーID']];
+  readLog().forEach(function (r) {
+    var no = String(r[0]), code = String(r[2]);
+    if (no.slice(0, 8) !== day || seen[code]) return;
+    seen[code] = true;
+    lines.push([no, r[1], code, r[3] instanceof Date ? Utilities.formatDate(r[3], TZ, 'yyyy/MM/dd HH:mm:ss') : r[3], r[4], r[5]]);
+  });
+  var body = lines.map(function (r, i) {
+    return r.map(function (v, j) {
+      var t = String(v == null ? '' : v);
+      /* 管理番号・配送CDは、Excelで開いた時に先頭の0が消えないよう ="…" の形で渡す */
+      if (i > 0 && (j === 2 || j === 4) && t) return '"=""' + t.replace(/"/g, '') + '"""';
+      return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+    }).join(',');
+  }).join('\r\n');
+  return ContentService.createTextOutput('﻿' + body + '\r\n')
+    .setMimeType(ContentService.MimeType.CSV)
+    .downloadAsFile('pallet-scan_' + day + '.csv');
 }
 
 function readLog() {
@@ -79,10 +109,11 @@ function buildStats(rows, day, today) {
 
     var p = pallets[no];
     if (!p) {
-      p = pallets[no] = { pallet: no, carrier: carrier, cd: String(r[4]), user: user, boxes: 0, first: 0, last: 0 };
+      p = pallets[no] = { pallet: no, carrier: carrier, cd: String(r[4]), user: user, boxes: 0, first: 0, last: 0, items: [] };
       order.push(no);
     }
     p.boxes++;
+    p.items.push({ code: code, at: at });   // 画面に返すのは直近10パレットの分だけ
     if (at && (!p.first || at < p.first)) p.first = at;
     if (at > p.last) p.last = at;
 
@@ -133,6 +164,7 @@ function buildStats(rows, day, today) {
     users: userList,
     carriers: carrierList,
     recent: recent,
+    csvUrl: ScriptApp.getService().getUrl() + '?csv=' + day,
     updated: Date.now()
   };
 }
@@ -144,40 +176,34 @@ var PAGE = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <style>
+  /* 進捗Dashboard と同じ紺で固定（OSのライト/ダーク設定は見ない）。
+     棒は進捗Dashboardの「作業中」の水色、目盛り線は白の薄塗り */
   :root {
-    color-scheme: light;
-    --paper: #f3f5f7; --panel: #ffffff; --ink: #151a1f; --ink-2: #5b6672; --ink-3: #8a949e;
-    --line: #dde3e8; --grid: #eef1f4; --bar: #2a78d6; --bar-track: #e6edf6;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="light"]) {
-      color-scheme: dark;
-      --paper: #0e1216; --panel: #161b21; --ink: #e5eaef; --ink-2: #9aa5b1; --ink-3: #6d7884;
-      --line: #28313a; --grid: #1f262d; --bar: #3987e5; --bar-track: #1d2a3a;
-    }
-  }
-  :root[data-theme="dark"] {
     color-scheme: dark;
-    --paper: #0e1216; --panel: #161b21; --ink: #e5eaef; --ink-2: #9aa5b1; --ink-3: #6d7884;
-    --line: #28313a; --grid: #1f262d; --bar: #3987e5; --bar-track: #1d2a3a;
+    --paper: #2f4f7d; --panel: #003369; --ink: #eaf1fb; --ink-2: #b3c6dc; --ink-3: #8aa3c0;
+    --line: #14538c; --grid: rgba(255,255,255,.10); --bar: #5ec8f0; --bar-track: rgba(94,200,240,.22);
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--paper); color: var(--ink);
-         font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Meiryo", system-ui, sans-serif; line-height: 1.5; }
+         font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", "Meiryo", system-ui, sans-serif; line-height: 1.5; }
   .num { font-variant-numeric: tabular-nums; }
   header { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 14px 16px; }
-  h1 { font-size: 19px; margin: 0; margin-right: auto; }
-  select { font: inherit; font-size: 15px; padding: 6px 10px; border-radius: 7px; border: 1px solid var(--line);
+  h1 { font-size: 15px; font-weight: 600; color: var(--ink-2); letter-spacing: .04em; margin: 0; margin-right: auto; }
+  select { font: inherit; font-size: 15px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--line);
            background: var(--panel); color: var(--ink); }
+  .btn { font-size: 14px; font-weight: 700; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--line);
+         background: var(--panel); color: var(--ink); text-decoration: none; }
+  .btn:hover { border-color: var(--bar); }
+  .btn[hidden] { display: none; }
   .upd { font-size: 12.5px; color: var(--ink-2); }
-  .upd.bad { color: #d03a3a; font-weight: 700; }
+  .upd.bad { color: #e5695b; font-weight: 700; }
   main { padding: 0 16px 24px; display: grid; gap: 14px; grid-template-columns: 1fr; max-width: 1400px; margin: 0 auto; }
   @media (min-width: 980px) { main { grid-template-columns: 1fr 1fr; } .wide { grid-column: 1 / -1; } }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; min-width: 0; }
-  .card h2 { font-size: 14px; margin: 0 0 10px; color: var(--ink-2); font-weight: 700; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+  .card h2 { font-size: 13px; margin: 0 0 10px; color: var(--ink-2); font-weight: 700; letter-spacing: .08em; }
   .tiles { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
   @media (min-width: 700px) { .tiles { grid-template-columns: repeat(4, 1fr); } }
-  .tile .v { font-size: 30px; font-weight: 700; line-height: 1.1; white-space: nowrap; }
+  .tile .v { font-size: 30px; font-weight: 700; line-height: 1.1; white-space: nowrap; letter-spacing: -.02em; }
   @media (min-width: 700px) { .tile .v { font-size: 38px; } }
   .tile .v small { font-size: 15px; font-weight: 400; color: var(--ink-2); margin-left: 3px; }
   .tile .k { font-size: 13px; color: var(--ink-2); margin-top: 4px; }
@@ -189,11 +215,11 @@ var PAGE = `<!doctype html>
   .chart .b { fill: var(--bar); }
   .chart .hit { fill: transparent; cursor: default; }
   .chart .hit:hover + .b, .chart .b.on { opacity: .75; }
-  .tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--panel); font-size: 12.5px;
+  .tip { position: absolute; pointer-events: none; background: var(--ink); color: #003369; font-size: 12.5px;
          padding: 5px 8px; border-radius: 6px; white-space: nowrap; transform: translate(-50%, -100%); margin-top: -8px; }
   table { width: 100%; border-collapse: collapse; font-size: 14px; }
   th { text-align: left; font-size: 12px; color: var(--ink-2); font-weight: 700; padding: 4px 8px 6px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-  td { padding: 7px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
   th.r, td.r { text-align: right; }
   td.name { white-space: normal; }
   .scroll { overflow-x: auto; }
@@ -202,12 +228,23 @@ var PAGE = `<!doctype html>
   .inbar span { min-width: 3.2em; text-align: right; }
   .empty { color: var(--ink-3); font-size: 14px; padding: 18px 0; text-align: center; }
   .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px; }
+  tr.pal { cursor: pointer; }
+  tr.pal:hover td { background: rgba(255,255,255,.05); }
+  tr.pal:focus-visible { outline: 2px solid var(--bar); outline-offset: -2px; }
+  td.tw { width: 1.2em; padding-right: 0; color: var(--ink-2); }
+  tr.pal.open td { border-bottom-color: transparent; }
+  tr.items td { padding-top: 0; white-space: normal; }
+  .codes { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 4px 18px; padding: 2px 0 8px; }
+  .codes span { display: flex; align-items: baseline; gap: 10px; }
+  .codes em { font-style: normal; color: var(--ink-3); font-size: 12px; min-width: 1.8em; text-align: right; }
+  .codes small { color: var(--ink-2); font-size: 12px; }
 </style>
 </head>
 <body>
 <header>
   <h1>パレットスキャン実績</h1>
   <select id="day" aria-label="日付"></select>
+  <a class="btn" id="csv" target="_blank" rel="noopener" hidden>CSV</a>
   <span class="upd" id="upd">読み込み中…</span>
 </header>
 <main>
@@ -239,7 +276,7 @@ var PAGE = `<!doctype html>
 <script>
 var REFRESH_MS = 60000;
 var $ = function (id) { return document.getElementById(id); };
-var current = '', loading = false, lastOk = 0, lastSt = null;
+var current = '', loading = false, lastOk = 0, lastSt = null, openPal = {};
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
@@ -279,6 +316,7 @@ function render(st) {
     return '<option value="' + d + '"' + (d === st.day ? ' selected' : '') + '>' + fmtDay(d) + (d === opts[0] && st.isToday && d === st.day ? '（今日）' : '') + '</option>';
   }).join('');
 
+  if (st.csvUrl) { $('csv').href = st.csvUrl; $('csv').hidden = false; }
   $('upd').className = 'upd';
   $('upd').textContent = hm(st.updated) + ' 更新' + (st.isToday ? '・1分ごとに自動更新' : '');
 
@@ -304,11 +342,35 @@ function render(st) {
       return '<tr><td class="name">' + esc(c.name) + '</td><td class="r num">' + n(c.pallets) + '</td><td>' + inbar(c.boxes, maxC) + '</td></tr>';
     }).join('') + '</tbody></table>' : '<div class="empty">この日の記録はありません</div>';
 
-  $('recent').innerHTML = st.recent.length ? '<table><thead><tr><th>最後のスキャン</th><th>パレット番号</th><th>運送会社</th><th>担当</th><th class="r">箱</th></tr></thead><tbody>' +
+  /* 行を押すと、そのパレットの管理番号の一覧が下に開く。開いた状態は自動更新をまたいで保つ */
+  $('recent').innerHTML = st.recent.length ? '<table><thead><tr><th></th><th>最後のスキャン</th><th>パレット番号</th><th>運送会社</th><th>担当</th><th class="r">箱</th></tr></thead><tbody>' +
     st.recent.map(function (p) {
-      return '<tr><td class="num">' + hm(p.last) + '</td><td class="mono">' + esc(p.pallet) + '</td><td class="name">' + esc(p.carrier) + '</td>' +
-        '<td>' + esc(p.user) + '</td><td class="r num">' + n(p.boxes) + '</td></tr>';
+      var open = !!openPal[p.pallet];
+      return '<tr class="pal' + (open ? ' open' : '') + '" data-p="' + esc(p.pallet) + '" tabindex="0" aria-expanded="' + open + '">' +
+        '<td class="tw">' + (open ? '▾' : '▸') + '</td><td class="num">' + hm(p.last) + '</td><td class="mono">' + esc(p.pallet) + '</td><td class="name">' + esc(p.carrier) + '</td>' +
+        '<td>' + esc(p.user) + '</td><td class="r num">' + n(p.boxes) + '</td></tr>' +
+        '<tr class="items"' + (open ? '' : ' hidden') + '><td></td><td colspan="5"><div class="codes">' +
+        (p.items || []).map(function (it, i) {
+          return '<span><em class="num">' + (i + 1) + '</em><b class="mono">' + esc(it.code) + '</b><small class="num">' + hms(it.at) + '</small></span>';
+        }).join('') + '</div></td></tr>';
     }).join('') + '</tbody></table>' : '<div class="empty">この日の記録はありません</div>';
+  Array.prototype.forEach.call($('recent').querySelectorAll('tr.pal'), function (tr) {
+    var toggle = function () {
+      var open = !openPal[tr.dataset.p];
+      if (open) openPal[tr.dataset.p] = true; else delete openPal[tr.dataset.p];
+      tr.classList.toggle('open', open);
+      tr.setAttribute('aria-expanded', open);
+      tr.nextElementSibling.hidden = !open;
+      tr.firstChild.textContent = open ? '▾' : '▸';
+    };
+    tr.addEventListener('click', toggle);
+    tr.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  });
+}
+function hms(ms) {
+  if (!ms) return '—';
+  var t = new Date(ms);
+  return hm(ms) + ':' + ('0' + t.getSeconds()).slice(-2);
 }
 
 function inbar(v, max) {
@@ -366,7 +428,7 @@ function niceStep(max) {
   return Math.max(1, (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p);
 }
 
-$('day').onchange = function () { current = this.value; lastSt = null; load(); };
+$('day').onchange = function () { current = this.value; lastSt = null; openPal = {}; load(); };
 /* 自動更新は今日を見ている時だけ。過去の日は数字が変わらないので取りに行かない */
 setInterval(function () {
   if (!document.hidden && (!lastSt || lastSt.isToday)) load();
