@@ -29,11 +29,21 @@
  *   平文のままだとシートの閲覧者に見えるため。書いてから初回ログインまでの間だけ平文が残る。
  *   計算に使う秘密の鍵は スクリプト プロパティ の PEPPER にある（初期設定で自動生成）。
  *   PEPPER を消したり変えたりすると全員のパスワードが通らなくなるので触らない。
+ *
+ * ■ スキャン記録の置き場所
+ *   このシート（パスワードがある方）には置かない。現場管理者に見せる別のスプレッドシート
+ *   （実績シート）に書く。実績シートのIDは スクリプト プロパティ の LOG_SHEET_ID に入れる
+ *   （公開リポジトリにIDを載せないため、コードには書かない）。
+ *   IDを入れたら関数「実績シート準備」を1回実行する → 実績シートに「日別」「明細」「スキャン記録」
+ *   ができ、このシートに残っている スキャン記録 タブがあれば中身を移してタブを消す。
  */
 
 var SHEET_LOG = 'スキャン記録';
 var SHEET_MASTER = 'マスタ';
 var SHEET_USERS = 'ユーザー';
+var SHEET_DAILY = '日別';
+var SHEET_DETAIL = '明細';
+var PROP_LOG_ID = 'LOG_SHEET_ID';
 var LOG_HEADER = ['パレット番号', '運送会社名', 'カートン管理番号', 'スキャン日時', '配送CD', 'ユーザーID'];
 var MASTER_HEADER = ['上4桁', '中4桁から', '中4桁まで', '配送CD', '名称', 'CD要', '色'];
 var USERS_HEADER = ['ユーザーID', '名前', '有効', 'パスワード（初回ログインで暗号化）', '連続ミス', '最終ログイン', '備考'];
@@ -262,6 +272,19 @@ function readMaster() {
   return out;
 }
 
+/* ===== 実績シート（スキャン記録の置き場所） ===== */
+function logBook() {
+  var id = PropertiesService.getScriptProperties().getProperty(PROP_LOG_ID);
+  if (!id) throw new Error('スクリプト プロパティ ' + PROP_LOG_ID + ' に実績シートのIDを入れること');
+  return SpreadsheetApp.openById(id);
+}
+
+function logSheet() {
+  var sh = logBook().getSheetByName(SHEET_LOG);
+  if (!sh) throw new Error('実績シートに スキャン記録 タブが無い。実績シート準備を実行すること');
+  return sh;
+}
+
 /* ===== パレット確定 =====
    連番は画面側では数えない。リロードや端末の持ち替えで重複するため、
    シート上の「その日・そのユーザー」の最大番号 + 1 をここで振る。
@@ -301,7 +324,7 @@ function commit(req, user) {
     var done = props.getProperty('done:' + clientId);
     if (done) return { ok: true, pallet: done, count: rows.length, duplicate: true };
 
-    var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_LOG);
+    var sh = logSheet();
     var prefix = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd') + '-' + user + '-';
     var seq = 0;
     var last = sh.getLastRow();
@@ -338,7 +361,7 @@ var TODAY_MAX_ROWS = 5000;
 function find(req) {
   var code = String(req.code || '');
   if (!/^\d{12}$/.test(code)) return { ok: false, error: 'bad_code' };
-  var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_LOG);
+  var sh = logSheet();
   var last = sh.getLastRow();
   if (last < 2) return { ok: true, hits: [] };
   var cells = sh.getRange(2, 3, last - 1, 1).createTextFinder(code).matchEntireCell(true).findAll();
@@ -351,7 +374,7 @@ function find(req) {
 }
 
 function today(req, user) {
-  var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_LOG);
+  var sh = logSheet();
   var last = sh.getLastRow();
   if (last < 2) return { ok: true, pallets: [] };
   var n = Math.min(last - 1, TODAY_MAX_ROWS);
@@ -454,15 +477,7 @@ function setPasswordFromDialog(id, name, pass) {
 function 初期設定() {
   var ss = SpreadsheetApp.getActive();
 
-  var log = ss.getSheetByName(SHEET_LOG) || ss.insertSheet(SHEET_LOG);
-  if (log.getLastRow() === 0) log.appendRow(LOG_HEADER);
-  log.setFrozenRows(1);
-  log.getRange('A:A').setNumberFormat('@');
-  log.getRange('C:C').setNumberFormat('@');                   // 管理番号の先頭0を守る
-  log.getRange('D:D').setNumberFormat('yyyy/mm/dd hh:mm:ss');
-  log.getRange('E:F').setNumberFormat('@');
-
-  var m = ss.getSheetByName(SHEET_MASTER) || ss.insertSheet(SHEET_MASTER);
+  var m =ss.getSheetByName(SHEET_MASTER) || ss.insertSheet(SHEET_MASTER);
   if (m.getLastRow() === 0) m.appendRow(MASTER_HEADER);
   m.setFrozenRows(1);
   m.getRange('A:A').setNumberFormat('@');
@@ -478,6 +493,165 @@ function 初期設定() {
   pepper();   // パスワード用の秘密鍵を先に作っておく
   onOpen();
   SpreadsheetApp.getUi().alert('タブを用意しました。\n\n次は マスタ タブに仕分け表を貼り、\nメニュー「スキャン管理 → パスワード設定」で使う人を登録してください。');
+}
+
+/* 実績シートを整える。何度実行してもよい（タブの作成・書式・数式は上書き、記録は重複させない）。
+   1. スキャン記録 タブを用意する
+   2. このシート（パスワードがある方）に スキャン記録 タブが残っていれば、実績シートへ移して消す
+   3. 現場管理者が見る「日別」「明細」タブを作る */
+function 実績シート準備() {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var ss = logBook();
+    ss.setSpreadsheetTimeZone(TZ);
+
+    var log = ss.getSheetByName(SHEET_LOG);
+    if (!log) {
+      /* 新規作成したスプレッドシートの空の「シート1」はそのまま使う */
+      var first = ss.getSheets()[0];
+      log = (first && first.getLastRow() === 0 && ss.getSheets().length === 1)
+        ? first.setName(SHEET_LOG) : ss.insertSheet(SHEET_LOG);
+    }
+    if (log.getLastRow() === 0) log.appendRow(LOG_HEADER);
+    log.setFrozenRows(1);
+    log.getRange('A:A').setNumberFormat('@');
+    log.getRange('C:C').setNumberFormat('@');                   // 管理番号の先頭0を守る
+    log.getRange('D:D').setNumberFormat('yyyy/mm/dd hh:mm:ss');
+    log.getRange('E:F').setNumberFormat('@');
+
+    var moved = moveOldLog(log);
+
+    buildDaily(ss.getSheetByName(SHEET_DAILY) || ss.insertSheet(SHEET_DAILY));
+    buildDetail(ss.getSheetByName(SHEET_DETAIL) || ss.insertSheet(SHEET_DETAIL));
+    ss.setActiveSheet(ss.getSheetByName(SHEET_DAILY));
+    ss.moveActiveSheet(1);
+    ss.setActiveSheet(ss.getSheetByName(SHEET_DETAIL));
+    ss.moveActiveSheet(2);
+    [ss.getSheetByName(SHEET_DAILY), ss.getSheetByName(SHEET_DETAIL), log].forEach(protectForViewers);
+
+    var msg = '実績シートを準備しました。' + (moved === null ? '' : '\n移した記録: ' + moved + ' 行（元のタブは消しました）');
+    console.log(msg);
+    return msg;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* このシートに残っている スキャン記録 を実績シートへ移す。
+   同じ パレット番号＋管理番号 が既にあれば書かない。移した分は日付順になるよう先頭側に差し込む
+   （今日のパレットの読み取りは「記録は下ほど新しい」前提のため）。
+   全部そろったのを確かめてから元のタブを消す。元のタブが無ければ null */
+function moveOldLog(log) {
+  var admin = SpreadsheetApp.getActive();
+  var old = admin.getSheetByName(SHEET_LOG);
+  if (!old) return null;
+
+  var have = {};
+  var last = log.getLastRow();
+  if (last >= 2) {
+    log.getRange(2, 1, last - 1, LOG_HEADER.length).getValues().forEach(function (r) {
+      have[String(r[0]) + '|' + String(r[2])] = true;
+    });
+  }
+  var rows = old.getLastRow() >= 2 ? old.getRange(2, 1, old.getLastRow() - 1, LOG_HEADER.length).getValues() : [];
+  var add = rows.filter(function (r) {
+    var k = String(r[0]) + '|' + String(r[2]);
+    if (!String(r[0]) || have[k]) return false;
+    have[k] = true;
+    return true;
+  });
+  if (add.length) {
+    log.insertRowsBefore(2, add.length);
+    log.getRange(2, 1, add.length, LOG_HEADER.length).setValues(add);
+    SpreadsheetApp.flush();
+  }
+
+  /* 書いたあとで読み直して、元の行が全部あるか確かめる */
+  var check = {};
+  log.getRange(2, 1, log.getLastRow() - 1, LOG_HEADER.length).getValues().forEach(function (r) {
+    check[String(r[0]) + '|' + String(r[2])] = true;
+  });
+  var missing = rows.filter(function (r) { return String(r[0]) && !check[String(r[0]) + '|' + String(r[2])]; });
+  if (missing.length) throw new Error('移しきれなかった行が ' + missing.length + ' 行ある。元のタブは消していない');
+  admin.deleteSheet(old);
+  return add.length;
+}
+
+/* 日別: 1日1行、新しい日が上。日付はパレット番号の先頭8桁（確定した日）で数える */
+function buildDaily(sh) {
+  sh.clear();
+  sh.getRange('A1').setValue('日別の実績（新しい日が上・自動で増えます）').setFontWeight('bold');
+  sh.getRange('A2:F2').setValues([['日付', 'パレット数', '箱数', '人数', '最初の確定', '最後の確定']])
+    .setFontWeight('bold').setBackground('#e8eef7');
+  var L = "'" + SHEET_LOG + "'!A2:A", D = "'" + SHEET_LOG + "'!D2:D", U = "'" + SHEET_LOG + "'!F2:F";
+  sh.getRange('A3').setFormula(
+    '=IFERROR(LET(k, SORT(UNIQUE(FILTER(LEFT(' + L + ',8), ' + L + '<>"")),1,FALSE), p, k&"-*",' +
+    ' HSTACK(DATE(LEFT(k,4),MID(k,5,2),RIGHT(k,2)),' +
+    ' MAP(p, LAMBDA(x, COUNTUNIQUEIFS(' + L + ', ' + L + ', x))),' +
+    ' MAP(p, LAMBDA(x, COUNTIF(' + L + ', x))),' +
+    ' MAP(p, LAMBDA(x, COUNTUNIQUEIFS(' + U + ', ' + L + ', x))),' +
+    ' MAP(p, LAMBDA(x, MINIFS(' + D + ', ' + L + ', x))),' +
+    ' MAP(p, LAMBDA(x, MAXIFS(' + D + ', ' + L + ', x))))), "まだ記録がありません")');
+  sh.getRange('A3:A').setNumberFormat('yyyy/mm/dd (ddd)');
+  sh.getRange('B3:D').setNumberFormat('#,##0');
+  sh.getRange('E3:F').setNumberFormat('hh:mm');
+  sh.setFrozenRows(2);
+  sh.setColumnWidth(1, 130);
+  for (var c = 2; c <= 6; c++) sh.setColumnWidth(c, 95);
+}
+
+/* 明細: B1 で日付を選ぶと、その日のパレット一覧・担当者別・運送会社別が出る */
+function buildDetail(sh) {
+  sh.clear();
+  sh.getRange('A1').setValue('日付').setFontWeight('bold');
+  var b1 = sh.getRange('B1');
+  b1.setDataValidation(SpreadsheetApp.newDataValidation()
+    .requireValueInRange(sh.getParent().getSheetByName(SHEET_DAILY).getRange('A3:A'), true)
+    .setAllowInvalid(false).build());
+  b1.setFormula("='" + SHEET_DAILY + "'!A3").setNumberFormat('yyyy/mm/dd (ddd)')
+    .setBackground('#fff8d6').setFontWeight('bold');
+  sh.getRange('C1').setValue('← ここで日付を選ぶ（▼）').setFontColor('#666');
+
+  var R = "'" + SHEET_LOG + "'!A2:F";
+  var day = '"&TEXT($B$1,"yyyymmdd")&"-';
+  var none = '"この日の記録はありません"';
+  /* パレットごとに1行にまとめたもの。担当者別・運送会社別はこれをさらにまとめる */
+  var perPallet = 'QUERY(' + R + ', "select A, F, B, count(C), min(D), max(D) where A starts with \'' + day + '\' group by A, F, B", 0)';
+
+  sh.getRange('A3').setValue('パレット一覧（確定順）').setFontWeight('bold');
+  sh.getRange('A4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + R + ', "select A, B, E, F, count(C), min(D), max(D) where A starts with \'' + day + '\'' +
+    ' group by A, B, E, F order by max(D)' +
+    ' label A \'パレット番号\', B \'運送会社\', E \'配送CD\', F \'担当\', count(C) \'箱数\', min(D) \'最初のスキャン\', max(D) \'最後のスキャン\'", 0), ' + none + '))');
+
+  sh.getRange('I3').setValue('担当者別').setFontWeight('bold');
+  sh.getRange('I4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col2, count(Col1), sum(Col4), min(Col5), max(Col6)' +
+    ' group by Col2 order by sum(Col4) desc' +
+    ' label Col2 \'担当\', count(Col1) \'パレット\', sum(Col4) \'箱数\', min(Col5) \'最初\', max(Col6) \'最後\'", 1), ' + none + '))');
+
+  sh.getRange('O3').setValue('運送会社別').setFontWeight('bold');
+  sh.getRange('O4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col3, count(Col1), sum(Col4)' +
+    ' group by Col3 order by sum(Col4) desc' +
+    ' label Col3 \'運送会社\', count(Col1) \'パレット\', sum(Col4) \'箱数\'", 1), ' + none + '))');
+
+  ['A4:G4', 'I4:M4', 'O4:Q4'].forEach(function (a) { sh.getRange(a).setFontWeight('bold').setBackground('#e8eef7'); });
+  ['F5:G', 'L5:M'].forEach(function (a) { sh.getRange(a).setNumberFormat('hh:mm'); });
+  sh.setFrozenRows(4);
+  sh.setColumnWidth(1, 170);
+  sh.setColumnWidth(2, 150);
+  sh.setColumnWidth(8, 24);
+  sh.setColumnWidth(14, 24);
+  sh.setColumnWidth(15, 150);
+}
+
+/* 現場管理者は編集者として共有しても、明細の日付欄（B1）以外は書き換えられないようにする。
+   保護は所有者（このスクリプトを実行した人）だけが外せる */
+function protectForViewers(sh) {
+  sh.getProtections(SpreadsheetApp.ProtectionType.SHEET).forEach(function (p) { p.remove(); });
+  var p = sh.protect().setDescription('現場管理者は閲覧のみ');
+  if (sh.getName() === SHEET_DETAIL) p.setUnprotectedRanges([sh.getRange('B1')]);
+  p.removeEditors(p.getEditors());
+  if (p.canDomainEdit()) p.setDomainEdit(false);
 }
 
 /* パスワードの漏えいが疑われる時などに、ログイン中の全端末を切る */
