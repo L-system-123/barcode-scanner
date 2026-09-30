@@ -375,7 +375,7 @@ function render(st) {
   drawChart(st.hourly);
 
   var maxU = Math.max.apply(null, st.users.map(function (u) { return u.boxes; }).concat([1]));
-  $('users').innerHTML = st.users.length ? '<table><thead><tr><th>担当</th><th class="r">パレット</th><th>箱</th><th class="r">箱/時</th><th class="r">最初</th><th class="r">最後</th></tr></thead><tbody>' +
+  $('users').innerHTML = st.users.length ? '<table><thead><tr><th>担当</th><th class="r">パレット数</th><th>箱</th><th class="r">箱/時</th><th class="r">最初</th><th class="r">最後</th></tr></thead><tbody>' +
     st.users.map(function (u) {
       return '<tr><td>' + esc(u.user) + '</td><td class="r num">' + n(u.pallets) + '</td>' +
         '<td>' + inbar(u.boxes, maxU) + '</td><td class="r num">' + (u.pace == null ? '—' : n(u.pace)) + '</td>' +
@@ -386,15 +386,15 @@ function render(st) {
   st.recent.forEach(function (p) { if (p.items) palItems[p.pallet] = p.items; });
 
   var maxC = Math.max.apply(null, st.carriers.map(function (c) { return c.boxes; }).concat([1]));
-  $('carriers').innerHTML = st.carriers.length ? '<table class="cars"><colgroup><col class="c-tw"><col class="c-cd"><col class="c-name"><col class="c-bar"><col class="c-t opt"></colgroup>' +
-    '<thead><tr><th></th><th><span class="opt">運送会社</span>CD</th><th>運送会社</th><th>箱</th><th class="r opt">最後のパレット確定</th></tr></thead><tbody>' +
+  $('carriers').innerHTML = st.carriers.length ? '<table class="cars"><colgroup><col class="c-tw"><col class="c-cd"><col class="c-name"><col class="c-n"><col class="c-bar"><col class="c-t opt"></colgroup>' +
+    '<thead><tr><th></th><th><span class="opt">運送会社</span>CD</th><th>運送会社</th><th class="r">パレット数</th><th>箱</th><th class="r opt">最後のパレット確定</th></tr></thead><tbody>' +
     st.carriers.map(function (c) {
       var key = 'c|' + c.name, open = !!openRow[key];
       return '<tr class="row car' + (open ? ' open' : '') + '" data-k="' + esc(key) + '" tabindex="0" aria-expanded="' + open + '">' +
         '<td class="tw">' + (open ? '▾' : '▸') + '</td><td class="num">' + esc(c.cd || '—') + '</td><td class="name strong">' + esc(c.name) + '</td>' +
-        '<td>' + inbar(c.boxes, maxC) + '</td>' +
+        '<td class="r num">' + n(c.pallets) + '</td><td>' + inbar(c.boxes, maxC) + '</td>' +
         '<td class="r num opt">' + hm(c.last) + '</td></tr>' +
-        '<tr class="sub"' + (open ? '' : ' hidden') + '><td></td><td colspan="4">' + palletTable(c.list, 'c', false) + '</td></tr>';
+        '<tr class="sub"' + (open ? '' : ' hidden') + '><td></td><td colspan="5">' + palletTable(c.list, 'c', false) + '</td></tr>';
     }).join('') + '</tbody></table>' : '<div class="empty">この日の記録はありません</div>';
 
   $('recent').innerHTML = st.recent.length ? palletTable(st.recent, 'r', true) : '<div class="empty">この日の記録はありません</div>';
