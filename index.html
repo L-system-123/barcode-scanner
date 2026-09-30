@@ -1636,6 +1636,12 @@ function flushOutbox() {
         outbox.shift();
         saveOutbox();
         var sk = r.skipped || [];
+        /* 送れた箱にパレット番号を付ける。一覧の取り直しを待たずに「スキャン済み（パレット番号）」と出せるように */
+        var skc = {};
+        sk.forEach(function (s) { skc[s.code] = true; doneCodes[s.code] = { pallet: s.pallet, user: s.user }; });
+        if (r.pallet) item.items.forEach(function (it) {
+          if (!skc[it.code]) doneCodes[it.code] = { pallet: r.pallet, user: lsGet(KEY.user) || '' };
+        });
         showSendStat(r.count ? r.pallet + ' を記録（' + r.count + '件）' : '記録なし（全部確定済みでした）', sk.length ? 'bad' : 'good');
         /* 読んだ時点では分からなかった重複（別の人が同じ箱を先に確定していた）。シートには書いていない */
         if (sk.length) {
@@ -1705,19 +1711,25 @@ function loadToday() {
 /* ===== 今日確定済みの箱（全員分） =====
    読んだ瞬間に「スキャン済み」と出すための一覧。ログイン時・確定のたび・30秒ごとに取り直す。
    未送信のパレットの箱も入れておく（送れるまでシートには無いため） */
-var doneCodes = {}, doneBusy = false;
+var doneCodes = {}, doneBusy = false, doneAgain = false;
 function loadDone() {
-  if (doneBusy || !lsGet(KEY.token)) return;
+  if (!lsGet(KEY.token)) return;
+  if (doneBusy) { doneAgain = true; return; }   /* 取り直し中に頼まれたら、終わってからもう一度 */
   doneBusy = true;
   api({ action: 'done', token: lsGet(KEY.token) }).then(function (r) {
     if (!r.ok) return;
     var m = {};
     (r.codes || []).forEach(function (c) { m[c[0]] = { pallet: c[1], user: c[2] }; });
+    /* シートの一覧が届く前に送れた分（手元ではパレット番号が分かっている）は残す */
+    Object.keys(doneCodes).forEach(function (k) { if (!m[k] && doneCodes[k].pallet) m[k] = doneCodes[k]; });
     outbox.forEach(function (o) {
       o.items.forEach(function (it) { if (!m[it.code]) m[it.code] = { pallet: '', user: lsGet(KEY.user) || '' }; });
     });
     doneCodes = m;
-  }).catch(function () {}).then(function () { doneBusy = false; });
+  }).catch(function () {}).then(function () {
+    doneBusy = false;
+    if (doneAgain) { doneAgain = false; loadDone(); }
+  });
 }
 setInterval(function () { if (!document.hidden) loadDone(); }, 30000);
 document.addEventListener('visibilitychange', function () { if (!document.hidden) loadDone(); });
