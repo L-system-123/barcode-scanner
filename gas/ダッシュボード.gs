@@ -169,7 +169,7 @@ function buildStats(rows, day, today) {
     var list = Object.keys(c.pallets).map(function (no) {
       var p = pallets[no];
       return { pallet: no, user: p.user, boxes: p.boxes, first: p.first, last: p.last };
-    }).sort(function (a, b) { return b.last - a.last; });
+    }).sort(function (a, b) { return a.last - b.last; });
     return { name: c.name, cd: c.cd, pallets: list.length, boxes: c.boxes, last: c.last,
              share: boxes ? c.boxes / boxes : 0, avg: list.length ? c.boxes / list.length : 0, list: list };
   }).sort(function (a, b) {
@@ -178,7 +178,8 @@ function buildStats(rows, day, today) {
     return x !== y ? x - y : (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   });
 
-  var recent = palletList.slice().sort(function (a, b) { return b.last - a.last; }).slice(0, 10);
+  /* 直近10パレット。画面では時刻の昇順（古い方が上）に並べる */
+  var recent = palletList.slice().sort(function (a, b) { return b.last - a.last; }).slice(0, 10).reverse();
 
   return {
     day: day,
@@ -263,7 +264,7 @@ var PAGE = `<!doctype html>
   /* 列幅は固定。広い画面で表を横いっぱいに伸ばすと、数字と名前が左右に離れて読みにくい */
   table.cars, table.pals { table-layout: fixed; }
   col.c-tw { width: 28px; } col.c-cd { width: 104px; } col.c-name { width: 180px; } col.c-n { width: 96px; }
-  col.c-t { width: 118px; } col.c-bar { width: 300px; }
+  col.c-t { width: 150px; } col.c-bar { width: 300px; }
   table.cars { width: auto; }
   col.c-pal { width: 230px; } col.c-box { width: 64px; } col.c-user { width: 130px; } col.c-car { width: 120px; }
   table.pals { background: rgba(0,0,0,.14); border-radius: 8px; width: auto; }
@@ -387,7 +388,7 @@ function render(st) {
 
   var maxC = Math.max.apply(null, st.carriers.map(function (c) { return c.boxes; }).concat([1]));
   $('carriers').innerHTML = st.carriers.length ? '<table class="cars"><colgroup><col class="c-tw"><col class="c-cd"><col class="c-name"><col class="c-n"><col class="c-bar"><col class="c-n opt"><col class="c-n opt"><col class="c-t opt"></colgroup>' +
-    '<thead><tr><th></th><th><span class="opt">運送会社</span>CD</th><th>運送会社</th><th class="r">パレット</th><th>箱</th><th class="r opt">箱/パレット</th><th class="r opt">割合</th><th class="r opt">最後のスキャン</th></tr></thead><tbody>' +
+    '<thead><tr><th></th><th><span class="opt">運送会社</span>CD</th><th>運送会社</th><th class="r">パレット</th><th>箱</th><th class="r opt">箱/パレット</th><th class="r opt">割合</th><th class="r opt">最後のパレット確定</th></tr></thead><tbody>' +
     st.carriers.map(function (c) {
       var key = 'c|' + c.name, open = !!openRow[key];
       return '<tr class="row car' + (open ? ' open' : '') + '" data-k="' + esc(key) + '" tabindex="0" aria-expanded="' + open + '">' +
@@ -411,7 +412,7 @@ function render(st) {
 function palletTable(list, scope, withCarrier) {
   return '<table class="pals"><colgroup><col class="c-tw"><col class="c-pal"><col class="c-box"><col class="c-user">' + (withCarrier ? '<col class="c-car">' : '') + '<col class="c-t opt"></colgroup>' +
     '<thead><tr><th></th><th>パレット番号</th><th class="r">箱</th><th>担当</th>' + (withCarrier ? '<th>運送会社</th>' : '') +
-    '<th class="r opt">最後のスキャン</th></tr></thead><tbody>' +
+    '<th class="r opt">パレット確定時刻</th></tr></thead><tbody>' +
     list.map(function (p) {
       var key = scope + 'p|' + p.pallet, open = !!openRow[key];
       return '<tr class="row pal' + (open ? ' open' : '') + '" data-k="' + esc(key) + '" data-p="' + esc(p.pallet) + '" tabindex="0" aria-expanded="' + open + '">' +
