@@ -586,13 +586,13 @@ function buildDaily(sh) {
     .setFontWeight('bold').setBackground('#e8eef7');
   var L = "'" + SHEET_LOG + "'!A2:A", D = "'" + SHEET_LOG + "'!D2:D", U = "'" + SHEET_LOG + "'!F2:F";
   sh.getRange('A3').setFormula(
-    '=IFERROR(LET(k, SORT(UNIQUE(FILTER(LEFT(' + L + ',8), ' + L + '<>"")),1,FALSE), p, k&"-*",' +
+    '=ARRAYFORMULA(IFERROR(LET(k, SORT(UNIQUE(FILTER(LEFT(' + L + ',8), ' + L + '<>"")),1,FALSE), p, k&"-*",' +
     ' HSTACK(DATE(LEFT(k,4),MID(k,5,2),RIGHT(k,2)),' +
     ' MAP(p, LAMBDA(x, COUNTUNIQUEIFS(' + L + ', ' + L + ', x))),' +
     ' MAP(p, LAMBDA(x, COUNTIF(' + L + ', x))),' +
     ' MAP(p, LAMBDA(x, COUNTUNIQUEIFS(' + U + ', ' + L + ', x))),' +
     ' MAP(p, LAMBDA(x, MINIFS(' + D + ', ' + L + ', x))),' +
-    ' MAP(p, LAMBDA(x, MAXIFS(' + D + ', ' + L + ', x))))), "まだ記録がありません")');
+    ' MAP(p, LAMBDA(x, MAXIFS(' + D + ', ' + L + ', x))))), "まだ記録がありません"))');
   sh.getRange('A3:A').setNumberFormat('yyyy/mm/dd (ddd)');
   sh.getRange('B3:D').setNumberFormat('#,##0');
   sh.getRange('E3:F').setNumberFormat('hh:mm');
