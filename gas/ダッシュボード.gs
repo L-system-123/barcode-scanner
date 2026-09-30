@@ -172,7 +172,11 @@ function buildStats(rows, day, today) {
     }).sort(function (a, b) { return b.last - a.last; });
     return { name: c.name, cd: c.cd, pallets: list.length, boxes: c.boxes, last: c.last,
              share: boxes ? c.boxes / boxes : 0, avg: list.length ? c.boxes / list.length : 0, list: list };
-  }).sort(function (a, b) { return b.boxes - a.boxes; });
+  }).sort(function (a, b) {
+    var x = a.cd === '' ? Infinity : +a.cd, y = b.cd === '' ? Infinity : +b.cd;
+    if (isNaN(x)) x = Infinity; if (isNaN(y)) y = Infinity;
+    return x !== y ? x - y : (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  });
 
   var recent = palletList.slice().sort(function (a, b) { return b.last - a.last; }).slice(0, 10);
 
@@ -244,7 +248,7 @@ var PAGE = `<!doctype html>
   th.r, td.r { text-align: right; }
   td.name { white-space: normal; }
   .scroll { overflow-x: auto; }
-  .inbar { display: flex; align-items: center; gap: 8px; min-width: 130px; }
+  .inbar { display: flex; align-items: center; gap: 10px; min-width: 130px; max-width: 420px; }
   .inbar i { display: block; height: 10px; border-radius: 0 4px 4px 0; background: var(--bar); min-width: 2px; }
   .inbar span { min-width: 3.2em; text-align: right; }
   .empty { color: var(--ink-3); font-size: 14px; padding: 18px 0; text-align: center; }
@@ -256,11 +260,23 @@ var PAGE = `<!doctype html>
   tr.car td.strong { font-size: 15px; }
   .strong { font-weight: 700; }
   tr.sub > td { padding: 0 8px 12px; border-bottom: 1px solid var(--line); }
-  table.pals { background: rgba(0,0,0,.14); border-radius: 8px; }
+  /* 列幅は固定。広い画面で表を横いっぱいに伸ばすと、数字と名前が左右に離れて読みにくい */
+  table.cars, table.pals { table-layout: fixed; }
+  col.c-tw { width: 28px; } col.c-cd { width: 104px; } col.c-name { width: 180px; } col.c-n { width: 96px; }
+  col.c-t { width: 118px; } col.c-bar { width: 300px; }
+  table.cars { width: auto; }
+  col.c-pal { width: 230px; } col.c-box { width: 64px; } col.c-user { width: 130px; } col.c-car { width: 120px; }
+  table.pals { background: rgba(0,0,0,.14); border-radius: 8px; width: auto; }
+  table.pals td.r, table.pals th.r { padding-right: 18px; }
+  td.name, td.mono { overflow: hidden; text-overflow: ellipsis; }
   table.pals th { padding-top: 8px; }
   .card h2 small { font-weight: 400; letter-spacing: 0; color: var(--ink-3); margin-left: 8px; font-size: 12px; }
   .wait { color: var(--ink-3); font-size: 13px; }
-  @media (max-width: 600px) { .opt { display: none; } .codes { grid-template-columns: 1fr; } }
+  @media (max-width: 600px) {
+    .opt { display: none; } .codes { grid-template-columns: 1fr; }
+    col.c-name { width: 110px; } col.c-cd { width: 44px; } col.c-n { width: 64px; } col.c-pal { width: 190px; } col.c-user { width: 90px; }
+    table.cars, table.pals { table-layout: auto; }
+  }
   td.tw { width: 1.2em; padding-right: 0; color: var(--ink-2); }
   tr.row.open > td { border-bottom-color: transparent; }
   tr.items td { padding-top: 0; white-space: normal; }
@@ -370,13 +386,14 @@ function render(st) {
   st.recent.forEach(function (p) { if (p.items) palItems[p.pallet] = p.items; });
 
   var maxC = Math.max.apply(null, st.carriers.map(function (c) { return c.boxes; }).concat([1]));
-  $('carriers').innerHTML = st.carriers.length ? '<table><thead><tr><th></th><th>運送会社</th><th class="r">パレット</th><th>箱</th><th class="r">箱/パレット</th><th class="r opt">割合</th><th class="opt">配送CD</th><th class="r opt">最後のスキャン</th></tr></thead><tbody>' +
+  $('carriers').innerHTML = st.carriers.length ? '<table class="cars"><colgroup><col class="c-tw"><col class="c-cd"><col class="c-name"><col class="c-n"><col class="c-bar"><col class="c-n opt"><col class="c-n opt"><col class="c-t opt"></colgroup>' +
+    '<thead><tr><th></th><th><span class="opt">運送会社</span>CD</th><th>運送会社</th><th class="r">パレット</th><th>箱</th><th class="r opt">箱/パレット</th><th class="r opt">割合</th><th class="r opt">最後のスキャン</th></tr></thead><tbody>' +
     st.carriers.map(function (c) {
       var key = 'c|' + c.name, open = !!openRow[key];
       return '<tr class="row car' + (open ? ' open' : '') + '" data-k="' + esc(key) + '" tabindex="0" aria-expanded="' + open + '">' +
-        '<td class="tw">' + (open ? '▾' : '▸') + '</td><td class="name strong">' + esc(c.name) + '</td>' +
-        '<td class="r num">' + n(c.pallets) + '</td><td>' + inbar(c.boxes, maxC) + '</td><td class="r num">' + c.avg.toFixed(1) + '</td>' +
-        '<td class="r num opt">' + Math.round(c.share * 100) + '%</td><td class="num opt">' + esc(c.cd || '—') + '</td><td class="r num opt">' + hm(c.last) + '</td></tr>' +
+        '<td class="tw">' + (open ? '▾' : '▸') + '</td><td class="num">' + esc(c.cd || '—') + '</td><td class="name strong">' + esc(c.name) + '</td>' +
+        '<td class="r num">' + n(c.pallets) + '</td><td>' + inbar(c.boxes, maxC) + '</td><td class="r num opt">' + c.avg.toFixed(1) + '</td>' +
+        '<td class="r num opt">' + Math.round(c.share * 100) + '%</td><td class="r num opt">' + hm(c.last) + '</td></tr>' +
         '<tr class="sub"' + (open ? '' : ' hidden') + '><td></td><td colspan="7">' + palletTable(c.list, 'c', false) + '</td></tr>';
     }).join('') + '</tbody></table>' : '<div class="empty">この日の記録はありません</div>';
 
@@ -392,7 +409,8 @@ function render(st) {
 
 /* パレットの表。押すと管理番号の一覧が開く。withCarrier: 運送会社の列を出すか */
 function palletTable(list, scope, withCarrier) {
-  return '<table class="pals"><thead><tr><th></th><th>パレット番号</th><th class="r">箱</th><th>担当</th>' + (withCarrier ? '<th>運送会社</th>' : '') +
+  return '<table class="pals"><colgroup><col class="c-tw"><col class="c-pal"><col class="c-box"><col class="c-user">' + (withCarrier ? '<col class="c-car">' : '') + '<col class="c-t opt"></colgroup>' +
+    '<thead><tr><th></th><th>パレット番号</th><th class="r">箱</th><th>担当</th>' + (withCarrier ? '<th>運送会社</th>' : '') +
     '<th class="r opt">最後のスキャン</th></tr></thead><tbody>' +
     list.map(function (p) {
       var key = scope + 'p|' + p.pallet, open = !!openRow[key];
