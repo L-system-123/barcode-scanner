@@ -73,6 +73,7 @@ function doPost(e) {
       case 'commit': return reply(withUser(req, function (user) { return commit(req, user); }));
       case 'today':  return reply(withUser(req, function (user) { return today(req, user); }));
       case 'find':   return reply(withUser(req, function () { return find(req); }));
+      case 'done':   return reply(withUser(req, function () { return doneToday(); }));
       default:       return reply({ ok: false, error: 'bad_action' });
     }
   } catch (err) {
@@ -334,6 +335,18 @@ function commit(req, user) {
         if (p.indexOf(prefix) === 0) seq = Math.max(seq, +p.slice(prefix.length) || 0);
       });
     }
+    /* 今日すでに別のパレットで確定済みの箱は書かない（先に確定した方を正とする）。
+       画面側でも読んだ時点で止めるが、2人が同時に同じ箱を読んだ場合はここでしか止められない */
+    var already = todayCodeMap(sh);
+    var skipped = [];
+    rows = rows.filter(function (r) {
+      var hit = already[r[0]];
+      if (hit) { skipped.push({ code: r[0], pallet: hit.pallet, user: hit.user }); return false; }
+      return true;
+    });
+    /* 全部確定済みだった時はパレット番号を振らない。再送されても同じ判定になるので done: も残さない */
+    if (!rows.length) return { ok: true, pallet: '', count: 0, skipped: skipped };
+
     var palletNo = prefix + ('000' + (seq + 1)).slice(-3);
 
     var out = rows.map(function (r) {
@@ -344,7 +357,7 @@ function commit(req, user) {
 
     props.setProperty('done:' + clientId, palletNo);
     purgeDone(props);
-    return { ok: true, pallet: palletNo, count: out.length };
+    return { ok: true, pallet: palletNo, count: out.length, skipped: skipped };
   } finally {
     lock.releaseLock();
   }
@@ -354,6 +367,25 @@ function commit(req, user) {
    スキャン記録は確定順に下へ追記されるので、今日の分は必ず末尾にまとまっている。
    シート全体は読まず、末尾から最大 TODAY_MAX_ROWS 行だけ見る */
 var TODAY_MAX_ROWS = 5000;
+
+/* 今日確定済みの箱: { 管理番号: { pallet, user } }。同じ番号が複数あれば先に確定した方 */
+function todayCodeMap(sh) {
+  var last = sh.getLastRow(), map = {};
+  if (last < 2) return map;
+  var n = Math.min(last - 1, TODAY_MAX_ROWS);
+  var prefix = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd') + '-';
+  sh.getRange(last - n + 1, 1, n, LOG_HEADER.length).getValues().forEach(function (r) {
+    var no = String(r[0]), code = String(r[2]);
+    if (no.indexOf(prefix) === 0 && !map[code]) map[code] = { pallet: no, user: String(r[5]) };
+  });
+  return map;
+}
+
+/* 画面側の「スキャン済み」判定用。全員分を [管理番号, パレット番号, ユーザー] の並びで返す */
+function doneToday() {
+  var map = todayCodeMap(logSheet());
+  return { ok: true, codes: Object.keys(map).map(function (c) { return [c, map[c].pallet, map[c].user]; }) };
+}
 
 /* ===== 管理番号から探す =====
    過去の分も含めて、スキャン記録の C列 を完全一致で探す。
@@ -521,6 +553,7 @@ function 実績シート準備() {
     log.getRange('E:F').setNumberFormat('@');
 
     var moved = moveOldLog(log);
+    var dups = removeDupLog(log);
 
     buildDaily(ss.getSheetByName(SHEET_DAILY) || ss.insertSheet(SHEET_DAILY));
     buildDetail(ss.getSheetByName(SHEET_DETAIL) || ss.insertSheet(SHEET_DETAIL));
@@ -530,7 +563,8 @@ function 実績シート準備() {
     ss.moveActiveSheet(2);
     [ss.getSheetByName(SHEET_DAILY), ss.getSheetByName(SHEET_DETAIL), log].forEach(protectForViewers);
 
-    var msg = '実績シートを準備しました。' + (moved === null ? '' : '\n移した記録: ' + moved + ' 行（元のタブは消しました）');
+    var msg = '実績シートを準備しました。' + (moved === null ? '' : '\n移した記録: ' + moved + ' 行（元のタブは消しました）') +
+      (dups ? '\n重複していた行を消しました: ' + dups + ' 行' : '');
     console.log(msg);
     return msg;
   } finally {
@@ -578,18 +612,39 @@ function moveOldLog(log) {
   return add.length;
 }
 
+/* 同じ日に同じ管理番号が2行以上あれば、先に確定した行（上の行）だけ残す。
+   確定時の重複チェックを入れる前に、別パレットへ二重に確定された分の掃除用。消した行数を返す */
+function removeDupLog(log) {
+  var last = log.getLastRow();
+  if (last < 3) return 0;
+  var rows = log.getRange(2, 1, last - 1, LOG_HEADER.length).getValues();
+  var seen = {};
+  var keep = rows.filter(function (r) {
+    var k = String(r[0]).slice(0, 8) + '|' + String(r[2]);
+    if (seen[k]) return false;
+    seen[k] = true;
+    return true;
+  });
+  var gone = rows.length - keep.length;
+  if (!gone) return 0;
+  log.getRange(2, 1, keep.length, LOG_HEADER.length).setValues(keep);
+  log.deleteRows(2 + keep.length, gone);
+  SpreadsheetApp.flush();
+  return gone;
+}
+
 /* 日別: 1日1行、新しい日が上。日付はパレット番号の先頭8桁（確定した日）で数える */
 function buildDaily(sh) {
   sh.clear();
   sh.getRange('A1').setValue('日別の実績（新しい日が上・自動で増えます）').setFontWeight('bold');
   sh.getRange('A2:F2').setValues([['日付', 'パレット数', '箱数', '人数', '最初の確定', '最後の確定']])
     .setFontWeight('bold').setBackground('#e8eef7');
-  var L = "'" + SHEET_LOG + "'!A2:A", D = "'" + SHEET_LOG + "'!D2:D", U = "'" + SHEET_LOG + "'!F2:F";
+  var L = "'" + SHEET_LOG + "'!A2:A", C = "'" + SHEET_LOG + "'!C2:C", D = "'" + SHEET_LOG + "'!D2:D", U = "'" + SHEET_LOG + "'!F2:F";
   sh.getRange('A3').setFormula(
     '=ARRAYFORMULA(IFERROR(LET(k, SORT(UNIQUE(FILTER(LEFT(' + L + ',8), ' + L + '<>"")),1,FALSE), p, k&"-*",' +
     ' HSTACK(DATE(LEFT(k,4),MID(k,5,2),RIGHT(k,2)),' +
     ' MAP(p, LAMBDA(x, COUNTUNIQUEIFS(' + L + ', ' + L + ', x))),' +
-    ' MAP(p, LAMBDA(x, COUNTIF(' + L + ', x))),' +
+    ' MAP(p, LAMBDA(x, COUNTUNIQUEIFS(' + C + ', ' + L + ', x))),' +
     ' MAP(p, LAMBDA(x, COUNTUNIQUEIFS(' + U + ', ' + L + ', x))),' +
     ' MAP(p, LAMBDA(x, MINIFS(' + D + ', ' + L + ', x))),' +
     ' MAP(p, LAMBDA(x, MAXIFS(' + D + ', ' + L + ', x))))), "まだ記録がありません"))');

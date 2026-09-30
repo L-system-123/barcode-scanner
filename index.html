@@ -259,7 +259,7 @@
   .alertbox h2 { font-size: 26px; margin: 0 0 8px; color: var(--a-ink); }
   .alertbox p {
     margin: 0 0 20px; font-size: 15px; line-height: 1.6;
-    word-break: break-all; color: var(--a-ink); opacity: .92;
+    word-break: break-all; color: var(--a-ink); opacity: .92; white-space: pre-line;
   }
   .alertbox button {
     background: var(--a-ink); color: var(--a-btn); border-color: var(--a-ink);
@@ -1093,6 +1093,7 @@ $('commitPallet').onclick = async function () {
     name: pallet.carrier.name,
     items: pallet.items.slice()
   });
+  pallet.items.forEach(function (it) { if (!doneCodes[it.code]) doneCodes[it.code] = { pallet: '', user: lsGet(KEY.user) || '' }; });
   saveOutbox();
   resetPallet();
   renderToday();   /* 送信を待たずに「未送信」として一覧に出す */
@@ -1317,6 +1318,15 @@ function handle(raw, decodeMs, format, skipFilter) {
     verdict = '同じ管理番号 — 読み取り済み';
     vcolor = '#f0b300';
     raiseAlert('warn', '同じ管理番号', code + ' はこのパレットで読み取り済みです（' + pallet.count + '件目まで計上済み）。件数には足していません');
+
+  } else if (doneCodes[code]) {
+    /* 今日すでに確定したパレットに入っている箱（自分・他の人とも） */
+    var dn = doneCodes[code];
+    verdict = 'スキャン済み — ' + (dn.pallet || '未送信のパレット');
+    vcolor = '#f0b300';
+    raiseAlert('warn', 'スキャン済み',
+      code + ' は' + (dn.pallet ? ' パレット ' + dn.pallet : ' 未送信のパレット') + (dn.user ? '（' + dn.user + '）' : '') +
+      ' で確定済みです。件数には足していません');
 
   } else if (!pallet.carrier) {
     /* 1枚目。このパレットの運送会社が決まる */
@@ -1547,6 +1557,7 @@ function enterApp(user) {
   $('start').disabled = running;
   flushOutbox();
   loadToday();
+  loadDone();
 }
 
 $('lApiEdit').onclick = function () {
@@ -1602,7 +1613,7 @@ $('logout').onclick = async function () {
   lsSet(KEY.master, null);
   CARRIERS = [];
   renderBands();
-  todayData = []; todayOpen = {};
+  todayData = []; todayOpen = {}; doneCodes = {};
   renderToday();
   $('who').hidden = true;
   showLogin('');
@@ -1624,9 +1635,16 @@ function flushOutbox() {
       if (r.ok) {
         outbox.shift();
         saveOutbox();
-        showSendStat(r.pallet + ' を記録（' + r.count + '件）', 'good');
+        var sk = r.skipped || [];
+        showSendStat(r.count ? r.pallet + ' を記録（' + r.count + '件）' : '記録なし（全部確定済みでした）', sk.length ? 'bad' : 'good');
+        /* 読んだ時点では分からなかった重複（別の人が同じ箱を先に確定していた）。シートには書いていない */
+        if (sk.length) {
+          raiseAlert('warn', '確定済みの箱を外しました',
+            sk.length + ' 箱は先に別のパレットで確定されていたため、' + (r.count ? r.pallet + ' には入れていません' : 'このパレットは記録していません') + '。\n' +
+            sk.map(function (s) { return s.code + ' → ' + s.pallet + '（' + s.user + '）'; }).join('\n'));
+        }
         if (outbox.length) flushOutbox();
-        else loadToday();
+        else { loadToday(); loadDone(); }
         return;
       }
       if (r.error === 'auth') {
@@ -1683,6 +1701,26 @@ function loadToday() {
     renderToday();
   });
 }
+
+/* ===== 今日確定済みの箱（全員分） =====
+   読んだ瞬間に「スキャン済み」と出すための一覧。ログイン時・確定のたび・30秒ごとに取り直す。
+   未送信のパレットの箱も入れておく（送れるまでシートには無いため） */
+var doneCodes = {}, doneBusy = false;
+function loadDone() {
+  if (doneBusy || !lsGet(KEY.token)) return;
+  doneBusy = true;
+  api({ action: 'done', token: lsGet(KEY.token) }).then(function (r) {
+    if (!r.ok) return;
+    var m = {};
+    (r.codes || []).forEach(function (c) { m[c[0]] = { pallet: c[1], user: c[2] }; });
+    outbox.forEach(function (o) {
+      o.items.forEach(function (it) { if (!m[it.code]) m[it.code] = { pallet: '', user: lsGet(KEY.user) || '' }; });
+    });
+    doneCodes = m;
+  }).catch(function () {}).then(function () { doneBusy = false; });
+}
+setInterval(function () { if (!document.hidden) loadDone(); }, 30000);
+document.addEventListener('visibilitychange', function () { if (!document.hidden) loadDone(); });
 
 function hhmm(ms) {
   if (!ms) return '—';
