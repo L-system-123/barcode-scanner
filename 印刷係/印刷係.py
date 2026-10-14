@@ -2,8 +2,9 @@
 GAS の印刷待ち（確定したパレット）を数秒ごとに取りに行き、担当のプリンターへ Wi-Fi で送る。
 プリンターは MAC アドレスで指定し、IP はその場で探す（DHCP で変わってもよいように）。
 
-  python 印刷係.py            … 常駐して印刷する
-  python 印刷係.py --test     … 既定のプリンターに見本を1枚出す
+  印刷係.exe（python 印刷係.py）  … 常駐して印刷する
+  印刷係.exe --test              … 既定のプリンターに見本を1枚出す
+  印刷係.exe --qr [MAC]          … そのプリンターに、本体に貼る登録用QRを出す
 設定は同じフォルダの 設定.json（公開しない）。
 """
 import concurrent.futures as cf
@@ -20,7 +21,8 @@ import urllib.request
 
 import ラベル
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# exe にした時は exe の隣、python で動かす時はこのファイルの隣に 設定.json を置く
+HERE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
 CONF = os.path.join(HERE, "設定.json")
 DONE = os.path.join(HERE, "印刷済み.txt")
 LOG = os.path.join(HERE, "印刷係.log")
@@ -126,6 +128,7 @@ def label_of(job):
         "pallet_no": job["pallet"],
         "time": at.strftime("%Y/%m/%d %H:%M"),
         "user": job.get("name") or job.get("user", ""),
+        "reprint": bool(job.get("reprint")),
     }
 
 
@@ -172,7 +175,7 @@ def run():
                 time.sleep(60)
                 continue
             for job in r.get("jobs", []):
-                p = job["pallet"]
+                p = job.get("id") or job["pallet"]     # 再発行は パレット番号-R時刻 で別に来る
                 if p not in done:
                     try:
                         print_job(finder, conf, job)
@@ -185,7 +188,7 @@ def run():
                     errors.pop(p, None)
                     with open(DONE, "a", encoding="utf-8-sig") as f:
                         f.write(p + "\n")
-                    log(f"○ {p}  {job.get('carrier')}  {job.get('count')}箱  {job.get('name') or job.get('user')}")
+                    log(f"○ {p}{'（再発行）' if job.get('reprint') else ''}  {job.get('carrier')}  {job.get('count')}箱  {job.get('name') or job.get('user')}")
                 unsent.add(p)
             if unsent:
                 api(conf, {"action": "printed", "pallets": sorted(unsent)})
@@ -204,5 +207,28 @@ def test():
     log("見本を1枚送りました")
 
 
+def qr_tag():
+    i = sys.argv.index("--qr")
+    mac = sys.argv[i + 1] if len(sys.argv) > i + 1 else input("プリンターのMACアドレス（例 00:11:22:AA:BB:CC）: ")
+    if not norm_mac(mac):
+        log("MACアドレスの形が違います")
+        return
+    ip = Finder().find(mac)
+    if not ip:
+        log(f"プリンター {norm_mac(mac)} が見つかりません（電源・Wi-Fi を確認）")
+        return
+    send(ip, ラベル.printer_tag(mac)[1])
+    log(f"{norm_mac(mac)} に登録用QRを出しました")
+
+
 if __name__ == "__main__":
-    test() if "--test" in sys.argv else run()
+    try:
+        if "--test" in sys.argv:
+            test()
+        elif "--qr" in sys.argv:
+            qr_tag()
+        else:
+            run()
+    except Exception as e:      # exe をダブルクリックした時に、理由が読めないまま閉じないように
+        log(f"止まりました: {e}")
+        input("Enter で閉じます")

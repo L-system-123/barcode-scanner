@@ -382,6 +382,11 @@
   .hit span { color: var(--ink-2); font-size: 12.5px; }
   .hit.none { border-left-color: var(--ink-2); color: var(--ink-2); }
   .hit.local { border-left-color: #f0b300; }
+  .hit .reprint, .pal .reprint { margin-top: 6px; min-height: 34px; padding: 5px 12px; font-size: 12.5px; }
+  .hit .reprint { display: block; }
+  .pal .reprint { margin: 0 0 10px; }
+  #prnState { font-size: 13px; color: var(--ink-2); }
+  #prnState b { font-family: "JetBrains Mono", monospace; color: var(--ink); }
   tr.sample td { color: var(--ink-2); font-style: italic; }
   .chip { font-weight: 700; color: var(--c, var(--ink-2)); filter: var(--chip-fx); }
 
@@ -551,6 +556,14 @@
     <div id="todayMsg"></div>
     <div id="todayList"></div>
     <div class="empty">今日確定したパレットはまだありません</div>
+  </section>
+
+  <section class="card">
+    <div class="cardhead">
+      <h2>ラベルプリンター</h2>
+      <button id="prnReg">プリンターを登録</button>
+    </div>
+    <div id="prnState">—</div>
   </section>
 
   <!-- 現場の作業には要らない情報。調子が悪い時の確認用に折りたたんで残す -->
@@ -1153,7 +1166,7 @@ async function loopNative(det) {
    本番中に壊れないよう、差し替えは「成功したら」の一方向にしかしない。 */
 var wasmZX = null, wasmFails = 0;
 /* 形式名は zxing-wasm の綴りに合わせる（ZXingのJS版とは別表記） */
-var WASM_FMT = { codabar: 'Codabar', ean_13: 'EAN-13', ean_8: 'EAN-8', code_128: 'Code128', code_39: 'Code39', itf: 'ITF' };
+var WASM_FMT = { codabar: 'Codabar', ean_13: 'EAN-13', ean_8: 'EAN-8', code_128: 'Code128', code_39: 'Code39', itf: 'ITF', qr_code: 'QRCode' };
 
 (function loadWasm() {
   /* バージョンは固定する。js側とwasm側がずれると動かない */
@@ -1188,7 +1201,7 @@ var WASM_FMT = { codabar: 'Codabar', ean_13: 'EAN-13', ean_8: 'EAN-8', code_128:
 function loopZXing() {
   var hints = new Map();
   hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-  var fmtMap = { codabar: 'CODABAR', ean_13: 'EAN_13', code_128: 'CODE_128', code_39: 'CODE_39', itf: 'ITF' };
+  var fmtMap = { codabar: 'CODABAR', ean_13: 'EAN_13', code_128: 'CODE_128', code_39: 'CODE_39', itf: 'ITF', qr_code: 'QR_CODE' };
   var want = FORMATS.map(function (f) { return ZXing.BarcodeFormat[fmtMap[f]]; })
                     .filter(function (v) { return v !== undefined; });
   if (want.length) hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, want);
@@ -1273,6 +1286,7 @@ function loopZXing() {
 
 function handle(raw, decodeMs, format, skipFilter) {
   if (asking) return;
+  if (prnMode) { readPrinterQr(raw); return; }
   var now = performance.now();
   /* 同じコードの連打を1.5秒間は無視する。実運用では必須 */
   if (raw === lastCode && now - lastCodeAt < 1500) return;
@@ -1453,7 +1467,7 @@ function doFind(code) {
       return;
     }
     var hits = r.hits.map(function (h) {
-      return { title: h.pallet, text: [h.carrier, stamp(h.at), h.user].filter(Boolean).join(' ・ '), color: colorOf(h) };
+      return { title: h.pallet, pallet: h.pallet, text: [h.carrier, stamp(h.at), h.user].filter(Boolean).join(' ・ '), color: colorOf(h) };
     });
     var all = local.concat(hits);
     if (!all.length) all = [{ none: true, text: code + ' はまだどのパレットにも積まれていません' }];
@@ -1474,6 +1488,7 @@ function showFind(list) {
     if (h.color) d.style.setProperty('--c', h.color);
     if (h.title) { var b = document.createElement('b'); b.textContent = h.title; d.appendChild(b); }
     var sp = document.createElement('span'); sp.textContent = h.text || ''; d.appendChild(sp);
+    if (h.pallet) d.appendChild(reprintButton(h.pallet));
     host.appendChild(d);
   });
 }
@@ -1493,7 +1508,7 @@ $('manual').addEventListener('keydown', function (e) {
    接続先URL・ログイン状態・送信待ちは端末の localStorage に置く。
    URLはリポジトリに書かない（公開なので、書くと誰でも叩ける）。初回だけ画面で貼ってもらう。
    パスワードは端末に残さない。ログインで受け取った期限付きのトークンだけを持つ。 */
-var KEY = { api: 'scan.api', token: 'scan.token', user: 'scan.user', master: 'scan.master', outbox: 'scan.outbox' };
+var KEY = { api: 'scan.api', token: 'scan.token', user: 'scan.user', master: 'scan.master', outbox: 'scan.outbox', printer: 'scan.printer' };
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {} }
 
@@ -1590,6 +1605,8 @@ $('lGo').onclick = function () {
     $('lPass').value = '';
     lsSet(KEY.token, r.token);
     lsSet(KEY.user, r.user);
+    lsSet(KEY.printer, r.printer || '');
+    showPrinter();
     setMaster(r.master);
     if (!CARRIERS.length) { $('lMsg').textContent = 'マスタ タブが空です'; return; }
     enterApp(r.user);
@@ -1614,6 +1631,7 @@ $('logout').onclick = async function () {
   CARRIERS = [];
   renderBands();
   todayData = []; todayOpen = {}; doneCodes = {};
+  lsSet(KEY.printer, null); showPrinter();
   renderToday();
   $('who').hidden = true;
   showLogin('');
@@ -1810,9 +1828,85 @@ function renderToday() {
       tr.insertCell().textContent = hhmmss(it.at);
     });
     d.appendChild(tb);
+    if (!p.unsent) d.appendChild(reprintButton(p.pallet));
     host.appendChild(d);
   });
 }
+
+/* ===== ラベル再発行 =====
+   印刷は印刷係のPCがやる。ここは「もう一度出して」と頼むだけ。押した人のプリンターに出る */
+function reprintButton(no) {
+  var b = document.createElement('button');
+  b.className = 'reprint';
+  b.textContent = 'ラベル再発行';
+  b.onclick = async function () {
+    if (!await ask(no + ' のラベルをもう一度出しますか？', '再発行')) return;
+    b.disabled = true;
+    b.textContent = '依頼中…';
+    api({ action: 'reprint', token: lsGet(KEY.token), pallet: no }).then(function (r) {
+      if (r.ok) { b.textContent = '依頼しました（' + r.count + '箱）'; return; }
+      if (r.error === 'auth') { lsSet(KEY.token, null); showLogin('ログインの期限が切れました'); return; }
+      b.textContent = '依頼できません（' + r.error + '）';
+      b.disabled = false;
+    }).catch(function () {
+      b.textContent = '依頼できません。電波を確認してもう一度';
+      b.disabled = false;
+    });
+  };
+  return b;
+}
+
+/* ===== プリンター登録 =====
+   プリンター本体に貼ったQR（PRN:MAC12桁）を読むと、ログイン中の人のプリンターになる。
+   普段は Codabar だけ読む設定なので、登録の間だけ QR に切り替えてカメラを開き直す */
+var prnMode = false, prnBusy = false;
+function showPrinter() {
+  var mac = lsGet(KEY.printer), el = $('prnState');
+  el.innerHTML = '';
+  if (mac) {
+    el.appendChild(document.createTextNode('登録済み '));
+    var b = document.createElement('b'); b.textContent = mac; el.appendChild(b);
+  } else {
+    el.textContent = '未登録（共用のプリンターから出ます）';
+  }
+  $('prnReg').textContent = prnMode ? 'やめる' : (mac ? '登録し直す' : 'プリンターを登録');
+}
+function setPrnMode(on) {
+  prnMode = on;
+  FORMATS = on ? ['qr_code'] : ['codabar'];
+  showPrinter();
+  $('code').textContent = on ? 'プリンターのQR' : '—';
+  $('band').textContent = on ? 'プリンターに貼ったQRを枠に入れてください' : '待機中';
+  if (running) stop();
+  start();
+}
+$('prnReg').onclick = async function () {
+  if (prnMode) { setPrnMode(false); return; }
+  if (pallet.count && !await ask('読み取り中のパレットはそのまま残ります。プリンターを登録しますか？', '登録する')) return;
+  setPrnMode(true);
+};
+function readPrinterQr(raw) {
+  var m = /^PRN:([0-9A-F]{12})$/i.exec(String(raw).trim());
+  if (!m) { $('band').textContent = 'プリンターのQRではありません'; return; }
+  if (prnBusy) return;
+  prnBusy = true;
+  $('band').textContent = '登録しています…';
+  api({ action: 'setPrinter', token: lsGet(KEY.token), mac: m[1] }).then(function (r) {
+    if (r.ok) {
+      lsSet(KEY.printer, r.printer);
+      beep();
+      setPrnMode(false);
+      $('code').textContent = r.printer;
+      $('band').textContent = 'プリンターを登録しました';
+      return;
+    }
+    if (r.error === 'auth') { setPrnMode(false); lsSet(KEY.token, null); showLogin('ログインの期限が切れました'); return; }
+    $('band').textContent = '登録できません（' + r.error + '）';
+  }).catch(function () {
+    $('band').textContent = '登録できません。電波を確認してもう一度読んでください';
+  }).then(function () { prnBusy = false; });
+}
+showPrinter();
 
 $('todayReload').onclick = loadToday;
 $('todayAll').onchange = function () { todayOpen = {}; loadToday(); };

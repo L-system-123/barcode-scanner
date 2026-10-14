@@ -41,6 +41,8 @@
  *   印刷係のPCが printQueue で取りに来て、出せたら printed で消す。シートは読まないので軽い。
  *   印刷係は ユーザー のログインではなく、スクリプト プロパティ PRINT_KEY と同じ値で通す。
  *   どのプリンターで出すかは ユーザー タブの H列（プリンターのMACアドレス）。空なら印刷係の既定のプリンター。
+ *   H列はスキャン画面の「プリンターを登録」でプリンターに貼ったQR（PRN:MAC12桁）を読むと入る。
+ *   再発行（reprint）は押した人のプリンターに出す。キーは prt:パレット番号-R時刻 で、最初の印刷と別に積む。
  */
 
 var SHEET_LOG = 'スキャン記録';
@@ -81,6 +83,8 @@ function doPost(e) {
       case 'today':  return reply(withUser(req, function (user) { return today(req, user); }));
       case 'find':   return reply(withUser(req, function () { return find(req); }));
       case 'done':   return reply(withUser(req, function () { return doneToday(); }));
+      case 'setPrinter': return reply(withUser(req, function (user) { return setPrinter(req, user); }));
+      case 'reprint':    return reply(withUser(req, function (user) { return reprint(req, user); }));
       case 'printQueue': return reply(withPrintKey(req, printQueue));
       case 'printed':    return reply(withPrintKey(req, printed));
       default:       return reply({ ok: false, error: 'bad_action' });
@@ -217,7 +221,8 @@ function login(req) {
     var token = Utilities.getUuid() + Utilities.getUuid();
     purgeTokens(props);
     props.setProperty('tok:' + token, JSON.stringify({ user: user, exp: Date.now() + TOKEN_HOURS * 3600 * 1000 }));
-    return { ok: true, token: token, user: user, hours: TOKEN_HOURS, master: readMaster() };
+    return { ok: true, token: token, user: user, hours: TOKEN_HOURS, master: readMaster(),
+             printer: String(u.values[U_PRINTER - 1] || '').trim() };
   } finally {
     lock.releaseLock();
   }
@@ -451,11 +456,13 @@ function purgeDone(props) {
 }
 
 /* ===== ラベル印刷 ===== */
+/* job.printer を先に決めてあればそれを使う（再発行は押した人のプリンター） */
 function queuePrint(props, job) {
   var u = findUser(usersSheet(), normUser(job.user));
   job.name = u ? String(u.values[U_NAME - 1] || '').trim() : '';
-  job.printer = u ? String(u.values[U_PRINTER - 1] || '').trim() : '';
-  props.setProperty('prt:' + job.pallet, JSON.stringify(job));
+  if (job.printer === undefined) job.printer = u ? String(u.values[U_PRINTER - 1] || '').trim() : '';
+  job.id = job.id || job.pallet;
+  props.setProperty('prt:' + job.id, JSON.stringify(job));
   var keys = Object.keys(props.getProperties()).filter(function (k) { return k.indexOf('prt:') === 0; }).sort();
   keys.slice(0, Math.max(0, keys.length - PRINT_MAX)).forEach(function (k) { props.deleteProperty(k); });
 }
@@ -479,9 +486,50 @@ function printed(req) {
   var props = PropertiesService.getScriptProperties();
   var list = Array.isArray(req.pallets) ? req.pallets : [];
   list.forEach(function (p) {
-    if (/^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}$/.test(String(p))) props.deleteProperty('prt:' + p);
+    if (/^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}(-R\d{1,15})?$/.test(String(p))) props.deleteProperty('prt:' + p);
   });
   return { ok: true };
+}
+
+/* プリンターに貼ったQR（PRN:001122AABBCC）を読んだら、そのユーザーのプリンターにする */
+function setPrinter(req, user) {
+  var hex = String(req.mac || '').toUpperCase().replace(/[^0-9A-F]/g, '');
+  if (hex.length !== 12) return { ok: false, error: 'bad_mac' };
+  var mac = hex.match(/../g).join(':');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    var sh = usersSheet();
+    var u = findUser(sh, normUser(user));
+    if (!u) return { ok: false, error: 'auth' };
+    sh.getRange(u.row, U_PRINTER).setValue(mac);
+    return { ok: true, printer: mac };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* 確定済みパレットのラベルをもう一度出す。中身はシートから数え直す（箱を消した後でも今の数になる） */
+function reprint(req, user) {
+  var no = String(req.pallet || '');
+  if (!/^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}$/.test(no)) return { ok: false, error: 'bad_pallet' };
+  var sh = logSheet();
+  var last = sh.getLastRow();
+  if (last < 2) return { ok: false, error: 'not_found' };
+  var cells = sh.getRange(2, 1, last - 1, 1).createTextFinder(no).matchEntireCell(true).findAll();
+  if (!cells.length) return { ok: false, error: 'not_found' };
+  var first = null, at = 0;
+  cells.forEach(function (c) {
+    var r = sh.getRange(c.getRow(), 1, 1, LOG_HEADER.length).getValues()[0];
+    if (!first) first = r;
+    if (r[3] instanceof Date) at = Math.max(at, r[3].getTime());
+  });
+  var me = findUser(usersSheet(), normUser(user));
+  var job = { id: no + '-R' + Date.now(), pallet: no, carrier: String(first[1]), cd: String(first[4]), count: cells.length,
+              at: at || Date.now(), user: String(first[5]), reprint: true,
+              printer: me ? String(me.values[U_PRINTER - 1] || '').trim() : '' };
+  queuePrint(PropertiesService.getScriptProperties(), job);
+  return { ok: true, pallet: no, count: cells.length };
 }
 
 /* ===== シートのメニュー ===== */
