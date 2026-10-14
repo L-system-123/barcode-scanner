@@ -1857,8 +1857,9 @@ function reprintButton(no) {
 }
 
 /* ===== プリンター登録 =====
-   プリンター本体に貼ったQR（PRN:MAC12桁）を読むと、ログイン中の人のプリンターになる。
-   普段は Codabar だけ読む設定なので、登録の間だけ QR に切り替えてカメラを開き直す */
+   プリンター本体に貼ったQRかバーコード（中身はMACアドレス。PRN: は付いていてもいなくてもよい）を読むと、
+   ログイン中の人のプリンターになる。
+   普段は Codabar だけ読む設定なので、登録の間だけ QR・Code128 に切り替えてカメラを開き直す */
 var prnMode = false, prnBusy = false;
 function showPrinter() {
   var mac = lsGet(KEY.printer), el = $('prnState');
@@ -1873,10 +1874,10 @@ function showPrinter() {
 }
 function setPrnMode(on) {
   prnMode = on;
-  FORMATS = on ? ['qr_code'] : ['codabar'];
+  FORMATS = on ? ['qr_code', 'code_128'] : ['codabar'];
   showPrinter();
   $('code').textContent = on ? 'プリンターのQR' : '—';
-  $('band').textContent = on ? 'プリンターに貼ったQRを枠に入れてください' : '待機中';
+  $('band').textContent = on ? 'プリンターに貼ったQR・バーコードを枠に入れてください' : '待機中';
   if (running) stop();
   start();
 }
@@ -1885,11 +1886,14 @@ $('prnReg').onclick = async function () {
   if (pallet.count && !await ask('読み取り中のパレットはそのまま残ります。プリンターを登録しますか？', '登録する')) return;
   setPrnMode(true);
 };
-function readPrinterQr(raw) {
-  var m = /^PRN:([0-9A-F]{12})$/i.exec(String(raw).trim());
-  if (!m) { $('band').textContent = 'プリンターのQRではありません'; return; }
+async function readPrinterQr(raw) {
+  var m = /^(?:PRN:)?((?:[0-9A-F]{2}[:-]?){5}[0-9A-F]{2})$/i.exec(String(raw).trim());
+  if (!m) { $('band').textContent = 'MACアドレスではありません（' + String(raw).slice(0, 24) + '）'; return; }
   if (prnBusy) return;
   prnBusy = true;
+  /* 12桁の数字（箱の管理番号など）も形の上では通るので、登録の前に目で確かめてもらう */
+  var mac = m[1].replace(/[:-]/g, '').toUpperCase().match(/../g).join(':');
+  if (!await ask(mac + ' を自分のプリンターにしますか？', '登録する')) { prnBusy = false; return; }
   $('band').textContent = '登録しています…';
   api({ action: 'setPrinter', token: lsGet(KEY.token), mac: m[1] }).then(function (r) {
     if (r.ok) {
