@@ -823,7 +823,8 @@ function 実績シート準備() {
     log.getRange('C:C').setNumberFormat('@');                   // 管理番号の先頭0を守る
     log.getRange('D:D').setNumberFormat('yyyy/mm/dd hh:mm:ss');
     log.getRange('E:G').setNumberFormat('@');
-    printedSheet();   // 明細の「ラベル」列が参照するので、数式より先に作る
+    printedSheet();   // 明細の「ラベル」「看板」列が参照するので、数式より先に作る
+    collectSheet();
 
     var moved = moveOldLog(log);
     var dups = removeDupLog(log);
@@ -930,7 +931,8 @@ function buildDaily(sh) {
 }
 
 /* 明細: B1 で日付を選ぶと、その日のパレット一覧・担当者別・運送会社別が出る。
-   パレット一覧の H列 はラベルを印刷したか（ラベル印刷 タブにあるか）、I列 はスキャンした場所 */
+   パレット一覧の H列 はラベルを印刷したか（ラベル印刷 タブにあるか）、I列 はスキャンした場所、
+   J列 は看板が戻ったか（看板回収 タブにあるか） */
 function buildDetail(sh) {
   sh.clear();
   sh.getRange('A1').setValue('日付').setFontWeight('bold');
@@ -955,32 +957,34 @@ function buildDetail(sh) {
   /* A列がパレット番号の行だけに出す（「この日の記録はありません」の行には出さない） */
   var isNo = 'REGEXMATCH(A5:A&"", "^\\d{8}-")';
   var placeOf = "IFERROR(VLOOKUP(A5:A, {'" + SHEET_LOG + "'!A2:A, '" + SHEET_LOG + "'!G2:G}, 2, FALSE)&\"\", \"\")";
-  sh.getRange('H4:I4').setValues([['ラベル', '場所']]);
+  sh.getRange('H4:J4').setValues([['ラベル', '場所', '看板']]);
   sh.getRange('H5').setFormula('=ARRAYFORMULA(IF(' + isNo + ', IF(COUNTIF(\'' + SHEET_PRINTED + '\'!A:A, A5:A) > 0, "印刷済み", "未印刷"), ""))');
   sh.getRange('I5').setFormula('=ARRAYFORMULA(IF(' + isNo + ', IF(' + placeOf + ' = "", "未設定", ' + placeOf + '), ""))');
+  sh.getRange('J5').setFormula('=ARRAYFORMULA(IF(' + isNo + ', IF(COUNTIF(\'' + SHEET_COLLECT + '\'!A:A, A5:A) > 0, "回収済み", "未回収"), ""))');
 
-  sh.getRange('K3').setValue('担当者別').setFontWeight('bold');
-  sh.getRange('K4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col2, count(Col1), sum(Col4), min(Col5), max(Col6)' +
+  sh.getRange('L3').setValue('担当者別').setFontWeight('bold');
+  sh.getRange('L4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col2, count(Col1), sum(Col4), min(Col5), max(Col6)' +
     ' group by Col2 order by sum(Col4) desc' +
     ' label Col2 \'担当\', count(Col1) \'パレット\', sum(Col4) \'箱数\', min(Col5) \'最初\', max(Col6) \'最後\'", 1), ' + none + '))');
 
-  sh.getRange('Q3').setValue('運送会社別').setFontWeight('bold');
-  sh.getRange('Q4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col3, count(Col1), sum(Col4)' +
+  sh.getRange('R3').setValue('運送会社別').setFontWeight('bold');
+  sh.getRange('R4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col3, count(Col1), sum(Col4)' +
     ' group by Col3 order by sum(Col4) desc' +
     ' label Col3 \'運送会社\', count(Col1) \'パレット\', sum(Col4) \'箱数\'", 1), ' + none + '))');
 
-  ['A4:I4', 'K4:O4', 'Q4:S4'].forEach(function (a) { sh.getRange(a).setFontWeight('bold').setBackground('#e8eef7'); });
-  ['F5:G', 'N5:O'].forEach(function (a) { sh.getRange(a).setNumberFormat('hh:mm'); });
+  ['A4:J4', 'L4:P4', 'R4:T4'].forEach(function (a) { sh.getRange(a).setFontWeight('bold').setBackground('#e8eef7'); });
+  ['F5:G', 'O5:P'].forEach(function (a) { sh.getRange(a).setNumberFormat('hh:mm'); });
   /* 列をずらす前の時刻の書式が残らないよう、数の列も明示する */
-  ['E5:E', 'L5:M', 'R5:S'].forEach(function (a) { sh.getRange(a).setNumberFormat('#,##0'); });
+  ['E5:E', 'M5:N', 'S5:T'].forEach(function (a) { sh.getRange(a).setNumberFormat('#,##0'); });
   sh.setFrozenRows(4);
   sh.setColumnWidth(1, 170);
   sh.setColumnWidth(2, 150);
   sh.setColumnWidth(8, 80);
   sh.setColumnWidth(9, 90);
-  sh.setColumnWidth(10, 24);
-  sh.setColumnWidth(16, 24);
-  sh.setColumnWidth(17, 150);
+  sh.setColumnWidth(10, 80);
+  sh.setColumnWidth(11, 24);
+  sh.setColumnWidth(17, 24);
+  sh.setColumnWidth(18, 150);
 }
 
 /* 現場管理者は編集者として共有しても、明細の日付欄（B1）以外は書き換えられないようにする。
