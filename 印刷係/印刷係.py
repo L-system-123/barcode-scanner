@@ -121,6 +121,38 @@ class Finder:
         return hit
 
 
+# ===== Wi-Fi を見張る =====
+# 設定.json の "wifi" に名前があれば、それ以外につながっていたら切り替える（無ければ何もしない）
+def current_ssid():
+    out = subprocess.run(["netsh", "wlan", "show", "interfaces"], capture_output=True, text=True, errors="replace").stdout
+    m = re.search(r"^\s*SSID\s*:\s*(.+?)\s*$", out, re.M)    # BSSID の行は頭に B が付くので当たらない
+    return m.group(1) if m else ""
+
+
+class WifiGuard:
+    EVERY = 30
+
+    def __init__(self, conf):
+        self.want = conf.get("wifi", "")
+        self.at = 0
+
+    def check(self):
+        if not self.want or time.time() - self.at < self.EVERY:
+            return
+        self.at = time.time()
+        now = current_ssid()
+        if now == self.want:
+            return
+        log(f"Wi-Fi が {now or '未接続'} なので {self.want} につなぎ直します")
+        r = subprocess.run(["netsh", "wlan", "connect", f"name={self.want}"], capture_output=True, text=True, errors="replace")
+        for _ in range(15):
+            time.sleep(1)
+            if current_ssid() == self.want:
+                log(f"{self.want} につながりました")
+                return
+        log(f"{self.want} につなげませんでした（この PC で一度手でつないでパスワードを保存しておく） {r.stdout.strip()}")
+
+
 def send(ip, data):
     with socket.create_connection((ip, PORT), timeout=10) as s:
         s.sendall(data)
@@ -179,12 +211,14 @@ def run():
         return
     conf = load_conf()
     finder = Finder()
+    wifi = WifiGuard(conf)
     done = load_done()        # 印刷したのに「印刷済み」を返せなかった分を二度出さないため
     unsent = set()
     errors = {}
     log("印刷係を開始しました" + ("（止めるときはこの画面を閉じる）" if sys.stdout else "（止めるときは 止める.bat）"))
     while True:
         try:
+            wifi.check()
             if unsent:
                 api(conf, {"action": "printed", "pallets": sorted(unsent)})
                 unsent.clear()
@@ -274,6 +308,16 @@ $s.Save()""")
         subprocess.Popen([exe], cwd=HERE, creationflags=0x00000008)   # DETACHED_PROCESS
         time.sleep(3)
     print("自動起動を設定しました。次から Windows にログインすると自動で動きます（画面には出ません）。")
+    want = load_conf().get("wifi", "")
+    if want:
+        r = subprocess.run(["netsh", "wlan", "set", "profileparameter", f"name={want}", "connectionmode=auto"],
+                           capture_output=True, text=True, errors="replace")
+        if r.returncode == 0:
+            print(f"Wi-Fi「{want}」を自動で接続するようにしました。")
+        else:
+            print(f"Wi-Fi「{want}」の自動接続は設定できませんでした（{r.stdout.strip() or r.stderr.strip()}）。")
+            print(f"　Wi-Fi の一覧で {want} を選び、「自動的に接続」にチェックを入れてください。")
+        print(f"ほかの Wi-Fi につながっていたら、印刷係が 30 秒以内に {want} へ切り替えます。")
     status()
 
 
