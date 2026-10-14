@@ -45,6 +45,14 @@
  *   H列はスキャン画面の「プリンターを登録」でプリンターに貼ったQR（PRN:MAC12桁）を読むと入る。
  *   再発行（reprint）は押した人のプリンターに出す。キーは prt:パレット番号-R時刻 で、最初の印刷と別に積む。
  *
+ * ■ スキャンした場所
+ *   画面で選んだ場所を スキャン記録 の G列 に書く。選べる場所は、このプロジェクトの別ファイル（場所.js）の
+ *   var PLACES = ['…', '…']; で決める（地名なので公開リポジトリには入れない）。一覧に無い場所が来たら空欄（未設定）で書く
+ *   （古い画面から来た送信待ちも、止めずに記録するため）。
+ *
+ * ■ ラベル印刷の記録
+ *   印刷係が printed を返したら、実績シートの ラベル印刷 タブに書く（明細の「ラベル」列が見る）。
+ *
  * ■ 看板回収チェック
  *   ドライバーが回収してきた看板（ラベルのQR）を読み、kanban で判定、collect で実績シートの 看板回収 タブに書く。
  *   タブは最初に使った時にできる。ダッシュボードからも「回収済みにする」で書く。
@@ -56,7 +64,9 @@ var SHEET_USERS = 'ユーザー';
 var SHEET_DAILY = '日別';
 var SHEET_DETAIL = '明細';
 var PROP_LOG_ID = 'LOG_SHEET_ID';
-var LOG_HEADER = ['パレット番号', '運送会社名', 'カートン管理番号', 'スキャン日時', '配送CD', 'ユーザーID'];
+var LOG_HEADER = ['パレット番号', '運送会社名', 'カートン管理番号', 'スキャン日時', '配送CD', 'ユーザーID', '場所'];
+var SHEET_PRINTED = 'ラベル印刷';
+var PRINTED_HEADER = ['パレット番号', '印刷日時', '種類'];
 var MASTER_HEADER = ['上4桁', '中4桁から', '中4桁まで', '配送CD', '名称', 'CD要', '色'];
 var USERS_HEADER = ['ユーザーID', '名前', '有効', 'パスワード', '連続ミス', '最終ログイン', '備考'];
 /* ユーザー タブの列番号（1始まり） */
@@ -83,7 +93,7 @@ function doPost(e) {
   try {
     switch (req.action) {
       case 'login':  return reply(login(req));
-      case 'master': return reply(withUser(req, function () { return { ok: true, master: readMaster() }; }));
+      case 'master': return reply(withUser(req, function () { return { ok: true, master: readMaster(), places: readPlaces() }; }));
       case 'commit': return reply(withUser(req, function (user) { return commit(req, user); }));
       case 'today':  return reply(withUser(req, function (user) { return today(req, user); }));
       case 'find':   return reply(withUser(req, function () { return find(req); }));
@@ -94,6 +104,8 @@ function doPost(e) {
       case 'collect':    return reply(withUser(req, function (user) { return collect(req, user); }));
       case 'printQueue': return reply(withPrintKey(req, printQueue));
       case 'printed':    return reply(withPrintKey(req, printed));
+      /* 実績シートのタブ・数式を作り直す（何度実行してもよい）。エディタを開かずに済むよう印刷係の鍵で通す */
+      case 'prepare':    return reply(withPrintKey(req, function () { return { ok: true, message: 実績シート準備() }; }));
       default:       return reply({ ok: false, error: 'bad_action' });
     }
   } catch (err) {
@@ -228,7 +240,7 @@ function login(req) {
     var token = Utilities.getUuid() + Utilities.getUuid();
     purgeTokens(props);
     props.setProperty('tok:' + token, JSON.stringify({ user: user, exp: Date.now() + TOKEN_HOURS * 3600 * 1000 }));
-    return { ok: true, token: token, user: user, hours: TOKEN_HOURS, master: readMaster(),
+    return { ok: true, token: token, user: user, hours: TOKEN_HOURS, master: readMaster(), places: readPlaces(),
              printer: String(u.values[U_PRINTER - 1] || '').trim() };
   } finally {
     lock.releaseLock();
@@ -287,6 +299,11 @@ function readMaster() {
   return out;
 }
 
+/* 選べる場所。場所.js が無ければ空（画面は場所を聞かない） */
+function readPlaces() {
+  return (typeof PLACES !== 'undefined' && Array.isArray(PLACES)) ? PLACES.map(String) : [];
+}
+
 /* ===== 実績シート（スキャン記録の置き場所） ===== */
 function logBook() {
   var id = PropertiesService.getScriptProperties().getProperty(PROP_LOG_ID);
@@ -322,6 +339,9 @@ function commit(req, user) {
     if (cd ? master[i].cd === cd : (!master[i].cd && master[i].name === String(req.name || ''))) { carrier = master[i]; break; }
   }
   if (!carrier) return { ok: false, error: 'unknown_carrier' };
+
+  var place = String(req.place || '');
+  if (readPlaces().indexOf(place) < 0) place = '';
 
   var rows = [];
   for (var j = 0; j < items.length; j++) {
@@ -364,7 +384,7 @@ function commit(req, user) {
     var palletNo = prefix + ('000' + (seq + 1)).slice(-3);
 
     var out = rows.map(function (r) {
-      return [palletNo, carrier.name, r[0], r[1], carrier.cd || '', user];
+      return [palletNo, carrier.name, r[0], r[1], carrier.cd || '', user, place];
     });
     sh.getRange(last + 1, 1, out.length, LOG_HEADER.length).setValues(out);
     SpreadsheetApp.flush();
@@ -494,10 +514,38 @@ function printQueue() {
 function printed(req) {
   var props = PropertiesService.getScriptProperties();
   var list = Array.isArray(req.pallets) ? req.pallets : [];
+  var now = new Date(), rows = [];
   list.forEach(function (p) {
-    if (/^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}(-R\d{1,15})?$/.test(String(p))) props.deleteProperty('prt:' + p);
+    p = String(p);
+    if (!/^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}(-R\d{1,15})?$/.test(p)) return;
+    /* 印刷待ちに残っていた分だけ記録する（印刷係は送り直しで同じ番号を何度か返すことがある） */
+    if (props.getProperty('prt:' + p) === null) return;
+    props.deleteProperty('prt:' + p);
+    var m = /^(.*)-R\d+$/.exec(p);
+    rows.push([m ? m[1] : p, now, m ? '再発行' : '確定時']);
   });
+  /* 記録が書けなくても、印刷待ちは消してよい（二重に出さないことを優先） */
+  if (rows.length) {
+    try {
+      var sh = printedSheet();
+      sh.getRange(sh.getLastRow() + 1, 1, rows.length, PRINTED_HEADER.length).setValues(rows);
+    } catch (err) { console.error(err); }
+  }
   return { ok: true };
+}
+
+/* 実績シートの ラベル印刷 タブ。無ければ作る */
+function printedSheet() {
+  var ss = logBook();
+  var sh = ss.getSheetByName(SHEET_PRINTED);
+  if (sh) return sh;
+  sh = ss.insertSheet(SHEET_PRINTED);
+  sh.appendRow(PRINTED_HEADER);
+  sh.setFrozenRows(1);
+  sh.getRange('A:A').setNumberFormat('@');
+  sh.getRange('B:B').setNumberFormat('yyyy/mm/dd hh:mm:ss');
+  protectForViewers(sh);
+  return sh;
 }
 
 /* プリンターに貼ったQR（PRN:001122AABBCC）を読んだら、そのユーザーのプリンターにする */
@@ -769,11 +817,13 @@ function 実績シート準備() {
         ? first.setName(SHEET_LOG) : ss.insertSheet(SHEET_LOG);
     }
     if (log.getLastRow() === 0) log.appendRow(LOG_HEADER);
+    else log.getRange(1, 1, 1, LOG_HEADER.length).setValues([LOG_HEADER]);   // 列を足した時に見出しも足す
     log.setFrozenRows(1);
     log.getRange('A:A').setNumberFormat('@');
     log.getRange('C:C').setNumberFormat('@');                   // 管理番号の先頭0を守る
     log.getRange('D:D').setNumberFormat('yyyy/mm/dd hh:mm:ss');
-    log.getRange('E:F').setNumberFormat('@');
+    log.getRange('E:G').setNumberFormat('@');
+    printedSheet();   // 明細の「ラベル」列が参照するので、数式より先に作る
 
     var moved = moveOldLog(log);
     var dups = removeDupLog(log);
@@ -784,7 +834,7 @@ function 実績シート準備() {
     ss.moveActiveSheet(1);
     ss.setActiveSheet(ss.getSheetByName(SHEET_DETAIL));
     ss.moveActiveSheet(2);
-    [ss.getSheetByName(SHEET_DAILY), ss.getSheetByName(SHEET_DETAIL), log, collectSheet()].forEach(protectForViewers);
+    [ss.getSheetByName(SHEET_DAILY), ss.getSheetByName(SHEET_DETAIL), log, collectSheet(), printedSheet()].forEach(protectForViewers);
 
     var msg = '実績シートを準備しました。' + (moved === null ? '' : '\n移した記録: ' + moved + ' 行（元のタブは消しました）') +
       (dups ? '\n重複していた行を消しました: ' + dups + ' 行' : '');
@@ -879,7 +929,8 @@ function buildDaily(sh) {
   for (var c = 2; c <= 6; c++) sh.setColumnWidth(c, 95);
 }
 
-/* 明細: B1 で日付を選ぶと、その日のパレット一覧・担当者別・運送会社別が出る */
+/* 明細: B1 で日付を選ぶと、その日のパレット一覧・担当者別・運送会社別が出る。
+   パレット一覧の H列 はラベルを印刷したか（ラベル印刷 タブにあるか）、I列 はスキャンした場所 */
 function buildDetail(sh) {
   sh.clear();
   sh.getRange('A1').setValue('日付').setFontWeight('bold');
@@ -901,25 +952,35 @@ function buildDetail(sh) {
   sh.getRange('A4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + R + ', "select A, B, E, F, count(C), min(D), max(D) where A starts with \'' + day + '\'' +
     ' group by A, B, E, F order by max(D)' +
     ' label A \'パレット番号\', B \'運送会社\', E \'配送CD\', F \'担当\', count(C) \'箱数\', min(D) \'最初のスキャン\', max(D) \'最後のスキャン\'", 0), ' + none + '))');
+  /* A列がパレット番号の行だけに出す（「この日の記録はありません」の行には出さない） */
+  var isNo = 'REGEXMATCH(A5:A&"", "^\\d{8}-")';
+  var placeOf = "IFERROR(VLOOKUP(A5:A, {'" + SHEET_LOG + "'!A2:A, '" + SHEET_LOG + "'!G2:G}, 2, FALSE)&\"\", \"\")";
+  sh.getRange('H4:I4').setValues([['ラベル', '場所']]);
+  sh.getRange('H5').setFormula('=ARRAYFORMULA(IF(' + isNo + ', IF(COUNTIF(\'' + SHEET_PRINTED + '\'!A:A, A5:A) > 0, "印刷済み", "未印刷"), ""))');
+  sh.getRange('I5').setFormula('=ARRAYFORMULA(IF(' + isNo + ', IF(' + placeOf + ' = "", "未設定", ' + placeOf + '), ""))');
 
-  sh.getRange('I3').setValue('担当者別').setFontWeight('bold');
-  sh.getRange('I4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col2, count(Col1), sum(Col4), min(Col5), max(Col6)' +
+  sh.getRange('K3').setValue('担当者別').setFontWeight('bold');
+  sh.getRange('K4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col2, count(Col1), sum(Col4), min(Col5), max(Col6)' +
     ' group by Col2 order by sum(Col4) desc' +
     ' label Col2 \'担当\', count(Col1) \'パレット\', sum(Col4) \'箱数\', min(Col5) \'最初\', max(Col6) \'最後\'", 1), ' + none + '))');
 
-  sh.getRange('O3').setValue('運送会社別').setFontWeight('bold');
-  sh.getRange('O4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col3, count(Col1), sum(Col4)' +
+  sh.getRange('Q3').setValue('運送会社別').setFontWeight('bold');
+  sh.getRange('Q4').setFormula('=IF($B$1="", "", IFERROR(QUERY(' + perPallet + ', "select Col3, count(Col1), sum(Col4)' +
     ' group by Col3 order by sum(Col4) desc' +
     ' label Col3 \'運送会社\', count(Col1) \'パレット\', sum(Col4) \'箱数\'", 1), ' + none + '))');
 
-  ['A4:G4', 'I4:M4', 'O4:Q4'].forEach(function (a) { sh.getRange(a).setFontWeight('bold').setBackground('#e8eef7'); });
-  ['F5:G', 'L5:M'].forEach(function (a) { sh.getRange(a).setNumberFormat('hh:mm'); });
+  ['A4:I4', 'K4:O4', 'Q4:S4'].forEach(function (a) { sh.getRange(a).setFontWeight('bold').setBackground('#e8eef7'); });
+  ['F5:G', 'N5:O'].forEach(function (a) { sh.getRange(a).setNumberFormat('hh:mm'); });
+  /* 列をずらす前の時刻の書式が残らないよう、数の列も明示する */
+  ['E5:E', 'L5:M', 'R5:S'].forEach(function (a) { sh.getRange(a).setNumberFormat('#,##0'); });
   sh.setFrozenRows(4);
   sh.setColumnWidth(1, 170);
   sh.setColumnWidth(2, 150);
-  sh.setColumnWidth(8, 24);
-  sh.setColumnWidth(14, 24);
-  sh.setColumnWidth(15, 150);
+  sh.setColumnWidth(8, 80);
+  sh.setColumnWidth(9, 90);
+  sh.setColumnWidth(10, 24);
+  sh.setColumnWidth(16, 24);
+  sh.setColumnWidth(17, 150);
 }
 
 /* 現場管理者は編集者として共有しても、明細の日付欄（B1）以外は書き換えられないようにする。

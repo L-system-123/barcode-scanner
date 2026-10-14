@@ -23,6 +23,10 @@
  *   Excelで文字化けしないよう BOM付きUTF-8。画面の「CSV」ボタンはこのURLを開くだけ
  *   （画面は iframe の中なので、そこから直接ダウンロードさせるより確実なため）。
  *
+ * ■ 場所
+ *   スキャン記録の G列（スキャン画面で選んだ場所）で絞れる。場所の一覧は記録に出てくる値から作る
+ *   （地名をこのファイルに書かないため）。空欄（場所を選ぶ前の記録）は「全部の場所」の時だけ数える。
+ *
  * ■ 看板回収
  *   スキャン画面の「看板回収チェック」が 看板回収 タブに書く（1パレット1行）。ここでは
  *   まだ戻っていない看板（全期間）と、選んだ日の回収を出す。「回収済みにする」はこの画面から 看板回収 タブに書く
@@ -38,24 +42,36 @@ var DATE_LIST_MAX = 60;
 
 function doGet(e) {
   var day = e && e.parameter && e.parameter.csv;
-  if (day) return csvOf(String(day));
+  if (day) return csvOf(String(day), String(e.parameter.place || ''));
   return HtmlService.createHtmlOutput(PAGE)
     .setTitle('パレットスキャン実績')
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');
 }
 
-/* day: 'yyyyMMdd'。空なら今日 */
-function getStats(day) {
+/* day: 'yyyyMMdd'。空なら今日。place: 場所の名前、空なら全部 */
+function getStats(day, place) {
   var today = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd');
   day = /^\d{8}$/.test(String(day || '')) ? String(day) : today;
+  place = String(place || '');
 
   var cache = CacheService.getScriptCache();
-  var hit = cache.get('st:' + day);
+  var key = 'st:' + day + '|' + place;
+  var hit = cache.get(key);
   if (hit) return JSON.parse(hit);
 
-  var st = buildStats(readLog(), day, today, readCollect());
-  try { cache.put('st:' + day, JSON.stringify(st), CACHE_SEC); } catch (e) { /* 大きすぎる時は諦める */ }
+  var st = buildStats(readLog(), day, today, readCollect(), place);
+  try { cache.put(key, JSON.stringify(st), CACHE_SEC); } catch (e) { /* 大きすぎる時は諦める */ }
   return st;
+}
+
+/* 記録に出てくる場所の一覧（空欄は除く） */
+function placesOf(rows) {
+  var m = {};
+  rows.forEach(function (r) { var p = String(r[6] || ''); if (p) m[p] = true; });
+  return Object.keys(m).sort();
+}
+function onlyPlace(rows, place) {
+  return place ? rows.filter(function (r) { return String(r[6] || '') === place; }) : rows;
 }
 
 /* 1パレット分の管理番号。運送会社別から開いた時に、その都度取りに来る（全パレット分を毎分送らないため）。
@@ -73,15 +89,16 @@ function getPallet(day, no) {
   return items;
 }
 
-function csvOf(day) {
+function csvOf(day, place) {
   if (!/^\d{8}$/.test(day)) return ContentService.createTextOutput('bad date').setMimeType(ContentService.MimeType.TEXT);
   var seen = {};
-  var lines = [['パレット番号', '運送会社名', 'カートン管理番号', 'スキャン日時', '配送CD', 'ユーザーID']];
+  var lines = [['パレット番号', '運送会社名', 'カートン管理番号', 'スキャン日時', '配送CD', 'ユーザーID', '場所']];
   readLog().forEach(function (r) {
     var no = String(r[0]), code = String(r[2]);
     if (no.slice(0, 8) !== day || seen[code]) return;
     seen[code] = true;
-    lines.push([no, r[1], code, r[3] instanceof Date ? Utilities.formatDate(r[3], TZ, 'yyyy/MM/dd HH:mm:ss') : r[3], r[4], r[5]]);
+    if (place && String(r[6] || '') !== place) return;
+    lines.push([no, r[1], code, r[3] instanceof Date ? Utilities.formatDate(r[3], TZ, 'yyyy/MM/dd HH:mm:ss') : r[3], r[4], r[5], r[6] || '']);
   });
   var body = lines.map(function (r, i) {
     return r.map(function (v, j) {
@@ -93,13 +110,13 @@ function csvOf(day) {
   }).join('\r\n');
   return ContentService.createTextOutput('﻿' + body + '\r\n')
     .setMimeType(ContentService.MimeType.CSV)
-    .downloadAsFile('pallet-scan_' + day + '.csv');
+    .downloadAsFile('pallet-scan_' + day + (place ? '_' + place : '') + '.csv');
 }
 
 function readLog() {
   var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_LOG);
   if (!sh || sh.getLastRow() < 2) return [];
-  return sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 7).getValues();
 }
 
 /* rows: [パレット番号, 運送会社名, 箱数, 回収日時, ユーザーID, 方法] */
@@ -142,11 +159,13 @@ function byCd(a, b) {
 /* まだ戻っていない看板（全期間、運送会社ごと）と、day に回収した分（同じ時刻・同じ人・同じ運送会社を1回とする）。
    箱数はスキャン記録から数える（同じパレットに同じ箱が2行あっても1箱） */
 function buildKanban(rows, crows, day) {
-  var got = {}, done = {}, order = [];
+  var got = {}, done = {}, order = [], mine = {};
+  rows.forEach(function (r) { mine[String(r[0])] = true; });   // 場所で絞った時は、その場所のパレットの回収だけ
   crows.forEach(function (r) {
     var no = String(r[0]);
     if (!no || got[no]) return;
     got[no] = true;
+    if (!mine[no]) return;
     var at = r[3] instanceof Date ? r[3].getTime() : 0;
     if (!at || jstDay(at) !== day) return;
     var k = at + '|' + r[4] + '|' + r[1];
@@ -185,7 +204,8 @@ function buildKanban(rows, crows, day) {
 }
 
 /* 「回収済みにする」。opt: { pallet } で1枚、{ until: 'yyyyMMdd', carrier: 名前か空 } で
-   パレットの日付が until 以前の未回収を全部。day は画面で見ている日（集計のキャッシュを捨てる）。書いた枚数を返す */
+   パレットの日付が until 以前の未回収を全部（place があればその場所の分だけ）。
+   day は画面で見ている日（集計のキャッシュを捨てる）。書いた枚数を返す */
 function markCollected(opt) {
   opt = opt || {};
   var pallet = String(opt.pallet || ''), until = String(opt.until || ''), carrier = String(opt.carrier || '');
@@ -194,7 +214,7 @@ function markCollected(opt) {
   lock.waitLock(20000);
   try {
     var sh = collectSheet();
-    var k = buildKanban(readLog(), readCollect(), '');
+    var k = buildKanban(onlyPlace(readLog(), String(opt.place || '')), readCollect(), '');
     var now = new Date(), take = [];
     k.carriers.forEach(function (c) {
       if (carrier && c.name !== carrier) return;
@@ -207,8 +227,9 @@ function markCollected(opt) {
       SpreadsheetApp.flush();
     }
     var cache = CacheService.getScriptCache();
-    cache.remove('st:' + Utilities.formatDate(now, TZ, 'yyyyMMdd'));
-    if (/^\d{8}$/.test(String(opt.day || ''))) cache.remove('st:' + opt.day);
+    var pl = '|' + String(opt.place || '');
+    cache.remove('st:' + Utilities.formatDate(now, TZ, 'yyyyMMdd') + pl);
+    if (/^\d{8}$/.test(String(opt.day || ''))) cache.remove('st:' + opt.day + pl);
     return take.length;
   } finally {
     lock.releaseLock();
@@ -216,7 +237,9 @@ function markCollected(opt) {
 }
 
 /* rows: [パレット番号, 運送会社名, 管理番号, スキャン日時, 配送CD, ユーザーID] */
-function buildStats(rows, day, today, crows) {
+function buildStats(allRows, day, today, crows, place) {
+  place = place || '';
+  var rows = onlyPlace(allRows, place);
   var dates = {}, seen = {}, pallets = {}, order = [];
   var hours = {}, users = {}, carriers = {};
   var first = 0, last = 0, boxes = 0;
@@ -306,7 +329,9 @@ function buildStats(rows, day, today, crows) {
     carriers: carrierList,
     recent: recent,
     kanban: buildKanban(rows, crows || [], day),
-    csvUrl: ScriptApp.getService().getUrl() + '?csv=' + day,
+    place: place,
+    places: placesOf(allRows),
+    csvUrl: ScriptApp.getService().getUrl() + '?csv=' + day + (place ? '&place=' + encodeURIComponent(place) : ''),
     updated: Date.now()
   };
 }
@@ -418,6 +443,7 @@ var PAGE = `<!doctype html>
 <body>
 <header>
   <h1>パレットスキャン実績</h1>
+  <select id="place" aria-label="場所" hidden></select>
   <select id="day" aria-label="日付"></select>
   <a class="btn" id="csv" target="_blank" rel="noopener" hidden>CSV</a>
   <span class="upd" id="upd">読み込み中…</span>
@@ -466,6 +492,8 @@ var PAGE = `<!doctype html>
 <script>
 var REFRESH_MS = 60000;
 var $ = function (id) { return document.getElementById(id); };
+var place = '';
+try { place = localStorage.getItem('dash.place') || ''; } catch (e) {}
 var current = '', loading = false, lastOk = 0, lastSt = null, openRow = {}, palItems = {}, palWait = {};
 
 function esc(s) {
@@ -494,12 +522,18 @@ function load() {
       $('upd').className = 'upd bad';
       $('upd').textContent = '更新できません（' + (e && e.message || e) + '）' + (lastOk ? ' 表示は ' + hm(lastOk) + ' 時点' : '');
     })
-    .getStats(current);
+    .getStats(current, place);
 }
 
 function render(st) {
   lastSt = st;
   current = st.day;
+  /* 場所が記録に出てくるまでは選ぶ欄を出さない */
+  var ps = st.places || [];
+  $('place').hidden = !ps.length;
+  $('place').innerHTML = '<option value="">全部の場所</option>' + ps.map(function (p) {
+    return '<option value="' + esc(p) + '"' + (p === st.place ? ' selected' : '') + '>' + esc(p) + '</option>';
+  }).join('');
   var sel = $('day');
   var opts = st.dates.indexOf(st.day) < 0 ? [st.day].concat(st.dates) : st.dates;
   sel.innerHTML = opts.map(function (d) {
@@ -610,7 +644,7 @@ function markOne(b) {
   }
   b.disabled = true;
   b.textContent = '記録中…';
-  runMark({ pallet: b.dataset.mark, day: current }, function () {}, function (e) { b.disabled = false; b.classList.remove('arm'); b.textContent = '失敗（' + e + '）'; });
+  runMark({ pallet: b.dataset.mark, day: current, place: place }, function () {}, function (e) { b.disabled = false; b.classList.remove('arm'); b.textContent = '失敗（' + e + '）'; });
 }
 var bulkArmed = null;
 function bulkPick() {
@@ -639,12 +673,12 @@ $('kbMark').onclick = function () {
     bulkArmed = pick;
     $('kbMark').classList.add('arm');
     $('kbMark').textContent = 'もう一度押すと実行';
-    msg.textContent = (pick.carrier || '全部の運送会社') + ' の ' + n(pick.pallets) + ' 枚（' + n(pick.boxes) + ' 箱）を回収済みにします';
+    msg.textContent = (place ? place + ' ・ ' : '') + (pick.carrier || '全部の運送会社') + ' の ' + n(pick.pallets) + ' 枚（' + n(pick.boxes) + ' 箱）を回収済みにします';
     return;
   }
   $('kbMark').disabled = true;
   msg.textContent = '記録中…';
-  runMark({ until: pick.until, carrier: pick.carrier, day: current }, function (cnt) {
+  runMark({ until: pick.until, carrier: pick.carrier, day: current, place: place }, function (cnt) {
     $('kbMark').disabled = false; disarmBulk();
     msg.textContent = n(cnt) + ' 枚を回収済みにしました';
   }, function (e) {
@@ -775,6 +809,12 @@ function niceStep(max) {
   return Math.max(1, (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p);
 }
 
+$('place').onchange = function () {
+  place = this.value;
+  try { localStorage.setItem('dash.place', place); } catch (e) {}
+  lastSt = null; openRow = {}; palItems = {}; disarmBulk(); $('kbMsg').textContent = '';
+  load();
+};
 $('day').onchange = function () { current = this.value; lastSt = null; openRow = {}; palItems = {}; load(); };
 /* 自動更新は今日を見ている時だけ。過去の日は数字が変わらないので取りに行かない */
 setInterval(function () {

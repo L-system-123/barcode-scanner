@@ -404,6 +404,12 @@
   /* QR は四角いので、読み取り枠も四角に近づける（grabROI の ROI と合わせる） */
   .stage.qr .reticle { inset: 22% 14%; }
   #prnState { font-size: 13px; color: var(--ink-2); }
+  /* ---- 場所 ---- */
+  .placebar { display: flex; align-items: center; gap: 8px; }
+  .placebar .label { flex: none; }
+  .placebar button { flex: 1 1 0; min-height: 42px; padding: 7px 10px; font-weight: 700; }
+  .placebar button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .placebar.need button { border-color: var(--signal); border-width: 2px; }
   #prnState b { font-family: "JetBrains Mono", monospace; color: var(--ink); }
   tr.sample td { color: var(--ink-2); font-style: italic; }
   .chip { font-weight: 700; color: var(--c, var(--ink-2)); filter: var(--chip-fx); }
@@ -451,6 +457,11 @@
       <button id="logout">ログアウト</button>
     </div>
   </header>
+
+  <!-- 選べる場所はログイン時に受け口から届く（地名なのでこのページには書かない） -->
+  <div class="placebar" id="placeBar" hidden>
+    <span class="label">場所</span>
+  </div>
 
   <div class="stage" id="stage">
     <video id="v" playsinline muted></video>
@@ -1153,12 +1164,14 @@ $('newPallet').onclick = async function () {
 $('commitPallet').onclick = async function () {
   armAudio();
   if (!pallet.count || !pallet.carrier) return;
+  if (needPlace()) return;
   if (!await ask(pallet.carrier.name + ' / ' + pallet.count + ' 件でパレットを確定しますか？', '確定する')) return;
   if (!pallet.count || !pallet.carrier) return;
   /* 先に送信待ちに積んでから画面を空にする。通信を待たずに次のパレットへ進めるように。
      送れなかった分は端末に残り、次の確定・ログイン・通信復帰の時に送り直す */
   outbox.push({
     clientId: pallet.clientId,
+    place: lsGet(KEY.place) || '',
     cd: pallet.carrier.cd || '',
     name: pallet.carrier.name,
     items: pallet.items.slice()
@@ -1551,7 +1564,7 @@ function showFind(list) {
   });
 }
 
-$('start').onclick = start;
+$('start').onclick = function () { if (!needPlace()) start(); };
 $('stop').onclick = stop;
 $('manualBtn').onclick = function () {
   var v = $('manual').value.trim();
@@ -1566,7 +1579,7 @@ $('manual').addEventListener('keydown', function (e) {
    接続先URL・ログイン状態・送信待ちは端末の localStorage に置く。
    URLはリポジトリに書かない（公開なので、書くと誰でも叩ける）。初回だけ画面で貼ってもらう。
    パスワードは端末に残さない。ログインで受け取った期限付きのトークンだけを持つ。 */
-var KEY = { api: 'scan.api', token: 'scan.token', user: 'scan.user', master: 'scan.master', outbox: 'scan.outbox', printer: 'scan.printer', kanban: 'scan.kanban' };
+var KEY = { api: 'scan.api', token: 'scan.token', user: 'scan.user', master: 'scan.master', outbox: 'scan.outbox', printer: 'scan.printer', kanban: 'scan.kanban', place: 'scan.place', places: 'scan.places' };
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {} }
 
@@ -1666,6 +1679,7 @@ $('lGo').onclick = function () {
     lsSet(KEY.printer, r.printer || '');
     showPrinter();
     setMaster(r.master);
+    setPlaces(r.places);
     if (!CARRIERS.length) { $('lMsg').textContent = 'マスタ タブが空です'; return; }
     enterApp(r.user);
   }).catch(function (e) {
@@ -1705,7 +1719,7 @@ function flushOutbox() {
   flushing = true;
   var item = outbox[0];
   showSendStat('送信中…');
-  api({ action: 'commit', token: lsGet(KEY.token), clientId: item.clientId, cd: item.cd, name: item.name, items: item.items })
+  api({ action: 'commit', token: lsGet(KEY.token), clientId: item.clientId, cd: item.cd, name: item.name, place: item.place || '', items: item.items })
     .then(function (r) {
       flushing = false;
       if (r.ok) {
@@ -1971,6 +1985,41 @@ async function readPrinterQr(raw) {
   }).then(function () { prnBusy = false; });
 }
 showPrinter();
+
+/* ===== 場所 =====
+   どこでスキャンしたか。端末に覚えておき、確定のたびに一緒に送る（スキャン記録の G列）。
+   選べる場所はログイン時に受け口から届く。届いた一覧が空なら、場所は聞かない */
+function placeList() {
+  try { return JSON.parse(lsGet(KEY.places) || '[]') || []; } catch (e) { return []; }
+}
+function setPlaces(list) {
+  if (!Array.isArray(list)) return;   // 古い受け口は一覧を返さない。前のまま
+  lsSet(KEY.places, JSON.stringify(list));
+  if (list.indexOf(lsGet(KEY.place)) < 0) lsSet(KEY.place, null);
+  renderPlaces();
+}
+function renderPlaces() {
+  var list = placeList(), cur = lsGet(KEY.place), bar = $('placeBar');
+  bar.hidden = !list.length;
+  Array.prototype.slice.call(bar.querySelectorAll('button')).forEach(function (b) { b.remove(); });
+  list.forEach(function (name) {
+    var b = document.createElement('button');
+    b.textContent = name;
+    b.className = name === cur ? 'on' : '';
+    b.setAttribute('aria-pressed', name === cur);
+    b.onclick = function () { lsSet(KEY.place, name); bar.classList.remove('need'); renderPlaces(); };
+    bar.appendChild(b);
+  });
+}
+/* 場所を選んでいなければ知らせて true を返す */
+function needPlace() {
+  if (!placeList().length || lsGet(KEY.place)) return false;
+  $('placeBar').classList.add('need');
+  window.scrollTo(0, 0);
+  raiseAlert('warn', '場所を選んでください', '画面いちばん上の「場所」で、今いる場所を選んでください');
+  return true;
+}
+renderPlaces();
 
 /* ===== 看板回収チェック =====
    ドライバーが回収した看板（ラベルのQR。中身はパレット番号だけ）を次々に読む。
@@ -2248,6 +2297,7 @@ $('todayAll').onchange = function () { todayOpen = {}; loadToday(); };
   api({ action: 'master', token: token }).then(function (r) {
     if (r.ok) {
       setMaster(r.master);
+      setPlaces(r.places);
       if (!cached || !cached.length) enterApp(user);
     } else if (r.error === 'auth') {
       lsSet(KEY.token, null);
