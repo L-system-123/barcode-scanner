@@ -35,6 +35,12 @@
  *   （公開リポジトリにIDを載せないため、コードには書かない）。
  *   IDを入れたら関数「実績シート準備」を1回実行する → 実績シートに「日別」「明細」「スキャン記録」
  *   ができ、このシートに残っている スキャン記録 タブがあれば中身を移してタブを消す。
+ *
+ * ■ ラベル印刷（印刷係のPC）
+ *   確定するたびに「印刷待ち」を スクリプト プロパティ に積み（キー prt:パレット番号）、
+ *   印刷係のPCが printQueue で取りに来て、出せたら printed で消す。シートは読まないので軽い。
+ *   印刷係は ユーザー のログインではなく、スクリプト プロパティ PRINT_KEY と同じ値で通す。
+ *   どのプリンターで出すかは ユーザー タブの H列（プリンターのMACアドレス）。空なら印刷係の既定のプリンター。
  */
 
 var SHEET_LOG = 'スキャン記録';
@@ -48,6 +54,8 @@ var MASTER_HEADER = ['上4桁', '中4桁から', '中4桁まで', '配送CD', '�
 var USERS_HEADER = ['ユーザーID', '名前', '有効', 'パスワード', '連続ミス', '最終ログイン', '備考'];
 /* ユーザー タブの列番号（1始まり） */
 var U_ID = 1, U_NAME = 2, U_ON = 3, U_HASH = 4, U_MISS = 5, U_LAST = 6, U_NOTE = 7;
+var U_PRINTER = 8;   // 見出しの外に足した列。登録ダイアログでは触らない
+var PRINT_MAX = 300; // 印刷待ちを残す上限（印刷係が長く止まっていた時に溜まりすぎないように）
 
 var TZ = 'Asia/Tokyo';
 var TOKEN_HOURS = 12;          // ログインの有効時間。1シフトより長めに
@@ -73,6 +81,8 @@ function doPost(e) {
       case 'today':  return reply(withUser(req, function (user) { return today(req, user); }));
       case 'find':   return reply(withUser(req, function () { return find(req); }));
       case 'done':   return reply(withUser(req, function () { return doneToday(); }));
+      case 'printQueue': return reply(withPrintKey(req, printQueue));
+      case 'printed':    return reply(withPrintKey(req, printed));
       default:       return reply({ ok: false, error: 'bad_action' });
     }
   } catch (err) {
@@ -109,7 +119,7 @@ function usersSheet() {
 function findUser(sh, user) {
   var last = sh.getLastRow();
   if (last < 2) return null;
-  var vals = sh.getRange(2, 1, last - 1, USERS_HEADER.length).getValues();
+  var vals = sh.getRange(2, 1, last - 1, U_PRINTER).getValues();
   for (var i = 0; i < vals.length; i++) {
     if (normUser(vals[i][U_ID - 1]) === user) return { row: i + 2, values: vals[i] };
   }
@@ -351,6 +361,9 @@ function commit(req, user) {
     purgeDone(props);
     /* 画面の「スキャン済み」一覧を、別に取りに来させずこの返事で更新する（呼び出し回数を増やさないため） */
     out.forEach(function (r) { if (!already[r[2]]) already[r[2]] = { pallet: palletNo, user: user }; });
+    /* 記録は書けているので、印刷待ちに積めなくても確定は成功として返す（再送で二重に書かせない） */
+    try { queuePrint(props, { pallet: palletNo, carrier: carrier.name, cd: carrier.cd || '', count: out.length, at: Date.now(), user: user }); }
+    catch (err) { console.error(err); }
     return { ok: true, pallet: palletNo, count: out.length, skipped: skipped, codes: codeList(already) };
   } finally {
     lock.releaseLock();
@@ -427,11 +440,48 @@ function today(req, user) {
   return { ok: true, pallets: order.reverse().map(function (no) { return byNo[no]; }) };
 }
 
-/* 再送判定用の記録は直近300件だけ残す。プロパティには容量上限がある */
+/* 再送判定用の記録は直近300件だけ残す。プロパティには容量上限がある。
+   キー（clientId）はでたらめな文字列なので、値のパレット番号（日付-ユーザー-連番）の古い順に消す */
 function purgeDone(props) {
-  var keys = Object.keys(props.getProperties()).filter(function (k) { return k.indexOf('done:') === 0; });
+  var all = props.getProperties();
+  var keys = Object.keys(all).filter(function (k) { return k.indexOf('done:') === 0; });
   if (keys.length <= 300) return;
+  keys.sort(function (a, b) { return all[a] < all[b] ? -1 : all[a] > all[b] ? 1 : 0; });
   keys.slice(0, keys.length - 300).forEach(function (k) { props.deleteProperty(k); });
+}
+
+/* ===== ラベル印刷 ===== */
+function queuePrint(props, job) {
+  var u = findUser(usersSheet(), normUser(job.user));
+  job.name = u ? String(u.values[U_NAME - 1] || '').trim() : '';
+  job.printer = u ? String(u.values[U_PRINTER - 1] || '').trim() : '';
+  props.setProperty('prt:' + job.pallet, JSON.stringify(job));
+  var keys = Object.keys(props.getProperties()).filter(function (k) { return k.indexOf('prt:') === 0; }).sort();
+  keys.slice(0, Math.max(0, keys.length - PRINT_MAX)).forEach(function (k) { props.deleteProperty(k); });
+}
+
+function withPrintKey(req, fn) {
+  var key = PropertiesService.getScriptProperties().getProperty('PRINT_KEY');
+  if (!key || key.length < 20 || !sameText(String(req.key || ''), key)) return { ok: false, error: 'auth' };
+  return fn(req);
+}
+
+/* 古い順（確定順）に返す */
+function printQueue() {
+  var all = PropertiesService.getScriptProperties().getProperties();
+  var jobs = Object.keys(all).filter(function (k) { return k.indexOf('prt:') === 0; }).map(function (k) {
+    try { return JSON.parse(all[k]); } catch (e) { return null; }
+  }).filter(Boolean).sort(function (a, b) { return a.at - b.at; });
+  return { ok: true, jobs: jobs.slice(0, 20) };
+}
+
+function printed(req) {
+  var props = PropertiesService.getScriptProperties();
+  var list = Array.isArray(req.pallets) ? req.pallets : [];
+  list.forEach(function (p) {
+    if (/^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}$/.test(String(p))) props.deleteProperty('prt:' + p);
+  });
+  return { ok: true };
 }
 
 /* ===== シートのメニュー ===== */
