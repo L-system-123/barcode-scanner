@@ -22,9 +22,16 @@
  *   …/exec?csv=yyyyMMdd でその日のスキャン記録（1箱1行、同じ日の重複は除く）をCSVで返す。
  *   Excelで文字化けしないよう BOM付きUTF-8。画面の「CSV」ボタンはこのURLを開くだけ
  *   （画面は iframe の中なので、そこから直接ダウンロードさせるより確実なため）。
+ *
+ * ■ 看板回収
+ *   スキャン画面の「看板回収チェック」が 看板回収 タブに書く（1パレット1行）。ここでは
+ *   まだ戻っていない看板（全期間）と、選んだ日の回収を出す。「回収済みにする」はこの画面から 看板回収 タブに書く
+ *   （看板をなくした・使い始める前のパレット、の片付け用。ユーザーIDは Dashboard、方法は 手動）。
  */
 
 var SHEET_LOG = 'スキャン記録';
+var SHEET_COLLECT = '看板回収';
+var COLLECT_HEADER = ['パレット番号', '運送会社名', '箱数', '回収日時', 'ユーザーID', '方法'];
 var TZ = 'Asia/Tokyo';
 var CACHE_SEC = 30;
 var DATE_LIST_MAX = 60;
@@ -46,7 +53,7 @@ function getStats(day) {
   var hit = cache.get('st:' + day);
   if (hit) return JSON.parse(hit);
 
-  var st = buildStats(readLog(), day, today);
+  var st = buildStats(readLog(), day, today, readCollect());
   try { cache.put('st:' + day, JSON.stringify(st), CACHE_SEC); } catch (e) { /* 大きすぎる時は諦める */ }
   return st;
 }
@@ -95,8 +102,121 @@ function readLog() {
   return sh.getRange(2, 1, sh.getLastRow() - 1, 6).getValues();
 }
 
+/* rows: [パレット番号, 運送会社名, 箱数, 回収日時, ユーザーID, 方法] */
+function readCollect() {
+  var sh = SpreadsheetApp.getActive().getSheetByName(SHEET_COLLECT);
+  if (!sh || sh.getLastRow() < 2) return [];
+  return sh.getRange(2, 1, sh.getLastRow() - 1, COLLECT_HEADER.length).getValues();
+}
+
+/* 看板回収 タブ。スキャン画面より先にここで使った時のために、無ければ作る */
+function collectSheet() {
+  var ss = SpreadsheetApp.getActive();
+  var sh = ss.getSheetByName(SHEET_COLLECT);
+  if (sh) return sh;
+  sh = ss.insertSheet(SHEET_COLLECT);
+  sh.appendRow(COLLECT_HEADER);
+  sh.setFrozenRows(1);
+  sh.getRange('A:A').setNumberFormat('@');
+  sh.getRange('D:D').setNumberFormat('yyyy/mm/dd hh:mm:ss');
+  sh.getRange('E:F').setNumberFormat('@');
+  var p = sh.protect().setDescription('現場管理者は閲覧のみ');
+  p.removeEditors(p.getEditors());
+  if (p.canDomainEdit()) p.setDomainEdit(false);
+  return sh;
+}
+
+/* 日本時間の yyyyMMdd */
+function jstDay(ms) {
+  var t = new Date(ms + 9 * 3600000);
+  return t.getUTCFullYear() + ('0' + (t.getUTCMonth() + 1)).slice(-2) + ('0' + t.getUTCDate()).slice(-2);
+}
+
+/* 運送会社CDの昇順。CDが無いもの（返品など）は最後、同じなら名前順 */
+function byCd(a, b) {
+  var x = a.cd === '' ? Infinity : +a.cd, y = b.cd === '' ? Infinity : +b.cd;
+  if (isNaN(x)) x = Infinity; if (isNaN(y)) y = Infinity;
+  return x !== y ? x - y : (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+
+/* まだ戻っていない看板（全期間、運送会社ごと）と、day に回収した分（同じ時刻・同じ人・同じ運送会社を1回とする）。
+   箱数はスキャン記録から数える（同じパレットに同じ箱が2行あっても1箱） */
+function buildKanban(rows, crows, day) {
+  var got = {}, done = {}, order = [];
+  crows.forEach(function (r) {
+    var no = String(r[0]);
+    if (!no || got[no]) return;
+    got[no] = true;
+    var at = r[3] instanceof Date ? r[3].getTime() : 0;
+    if (!at || jstDay(at) !== day) return;
+    var k = at + '|' + r[4] + '|' + r[1];
+    if (!done[k]) { done[k] = { at: at, user: String(r[4]), carrier: String(r[1]), how: String(r[5]), pallets: 0, boxes: 0 }; order.push(k); }
+    done[k].pallets++;
+    done[k].boxes += +r[2] || 0;
+  });
+
+  var pal = {}, seen = {};
+  rows.forEach(function (r) {
+    var no = String(r[0]), k = no + '|' + r[2];
+    if (!/^\d{8}-/.test(no) || got[no] || seen[k]) return;
+    seen[k] = true;
+    var p = pal[no] || (pal[no] = { pallet: no, carrier: String(r[1]), cd: String(r[4]), user: String(r[5]), boxes: 0, last: 0 });
+    p.boxes++;
+    var at = r[3] instanceof Date ? r[3].getTime() : 0;
+    if (at > p.last) p.last = at;
+  });
+
+  var cars = {}, total = { pallets: 0, boxes: 0 };
+  Object.keys(pal).forEach(function (no) {
+    var p = pal[no];
+    var c = cars[p.carrier] || (cars[p.carrier] = { name: p.carrier, cd: p.cd, pallets: 0, boxes: 0, list: [] });
+    c.pallets++; c.boxes += p.boxes;
+    total.pallets++; total.boxes += p.boxes;
+    c.list.push({ pallet: no, boxes: p.boxes, user: p.user, last: p.last });
+  });
+  var list = Object.keys(cars).map(function (k) {
+    var c = cars[k];
+    c.list.sort(function (a, b) { return a.pallet < b.pallet ? -1 : a.pallet > b.pallet ? 1 : 0; });
+    c.oldest = c.list[0].pallet.slice(0, 8);
+    return c;
+  }).sort(byCd);
+  return { carriers: list, pallets: total.pallets, boxes: total.boxes,
+           done: order.map(function (k) { return done[k]; }).sort(function (a, b) { return b.at - a.at; }) };
+}
+
+/* 「回収済みにする」。opt: { pallet } で1枚、{ until: 'yyyyMMdd', carrier: 名前か空 } で
+   パレットの日付が until 以前の未回収を全部。day は画面で見ている日（集計のキャッシュを捨てる）。書いた枚数を返す */
+function markCollected(opt) {
+  opt = opt || {};
+  var pallet = String(opt.pallet || ''), until = String(opt.until || ''), carrier = String(opt.carrier || '');
+  if (pallet ? !/^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}$/.test(pallet) : !/^\d{8}$/.test(until)) throw new Error('日付を選んでください');
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var sh = collectSheet();
+    var k = buildKanban(readLog(), readCollect(), '');
+    var now = new Date(), take = [];
+    k.carriers.forEach(function (c) {
+      if (carrier && c.name !== carrier) return;
+      c.list.forEach(function (p) {
+        if (pallet ? p.pallet === pallet : p.pallet.slice(0, 8) <= until) take.push([p.pallet, c.name, p.boxes, now, 'Dashboard', '手動']);
+      });
+    });
+    if (take.length) {
+      sh.getRange(sh.getLastRow() + 1, 1, take.length, COLLECT_HEADER.length).setValues(take);
+      SpreadsheetApp.flush();
+    }
+    var cache = CacheService.getScriptCache();
+    cache.remove('st:' + Utilities.formatDate(now, TZ, 'yyyyMMdd'));
+    if (/^\d{8}$/.test(String(opt.day || ''))) cache.remove('st:' + opt.day);
+    return take.length;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /* rows: [パレット番号, 運送会社名, 管理番号, スキャン日時, 配送CD, ユーザーID] */
-function buildStats(rows, day, today) {
+function buildStats(rows, day, today, crows) {
   var dates = {}, seen = {}, pallets = {}, order = [];
   var hours = {}, users = {}, carriers = {};
   var first = 0, last = 0, boxes = 0;
@@ -171,11 +291,7 @@ function buildStats(rows, day, today) {
       return { pallet: no, user: p.user, boxes: p.boxes, first: p.first, last: p.last };
     }).sort(function (a, b) { return a.last - b.last; });
     return { name: c.name, cd: c.cd, pallets: list.length, boxes: c.boxes, last: c.last, list: list };
-  }).sort(function (a, b) {
-    var x = a.cd === '' ? Infinity : +a.cd, y = b.cd === '' ? Infinity : +b.cd;
-    if (isNaN(x)) x = Infinity; if (isNaN(y)) y = Infinity;
-    return x !== y ? x - y : (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-  });
+  }).sort(byCd);
 
   /* 直近10パレット。画面では時刻の昇順（古い方が上）に並べる */
   var recent = palletList.slice().sort(function (a, b) { return b.last - a.last; }).slice(0, 10).reverse();
@@ -189,6 +305,7 @@ function buildStats(rows, day, today) {
     users: userList,
     carriers: carrierList,
     recent: recent,
+    kanban: buildKanban(rows, crows || [], day),
     csvUrl: ScriptApp.getService().getUrl() + '?csv=' + day,
     updated: Date.now()
   };
@@ -284,6 +401,18 @@ var PAGE = `<!doctype html>
   .codes span { display: flex; align-items: baseline; gap: 10px; }
   .codes em { font-style: normal; color: var(--ink-3); font-size: 12px; min-width: 1.8em; text-align: right; }
   .codes small { color: var(--ink-2); font-size: 12px; }
+  /* 看板回収 */
+  .kbbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 0 0 12px; font-size: 14px; color: var(--ink-2); }
+  .kbbar input, .kbbar select { font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line);
+                                background: var(--panel); color: var(--ink); color-scheme: dark; }
+  button.btn { cursor: pointer; font-family: inherit; }
+  button.btn.arm { background: #e5695b; border-color: #e5695b; color: #fff; }
+  button.btn.sm { font-size: 12.5px; padding: 4px 10px; }
+  .kbmsg { font-size: 13px; color: var(--ink); }
+  .kbmsg.bad { color: #e5695b; font-weight: 700; }
+  .kbsum { font-size: 14px; margin: 0 0 8px; }
+  .kbsum b { font-size: 20px; margin: 0 2px; }
+  col.c-day { width: 150px; } col.c-btn { width: 150px; } col.c-how { width: 80px; }
 </style>
 </head>
 <body>
@@ -309,6 +438,21 @@ var PAGE = `<!doctype html>
   <section class="card wide">
     <h2>運送会社別 <small>押すとパレットごとの箱数、パレットを押すと管理番号</small></h2>
     <div class="scroll" id="carriers"></div>
+  </section>
+  <section class="card wide">
+    <h2>まだ戻っていない看板 <small>全期間・押すとパレット</small></h2>
+    <div class="kbbar">
+      <span>パレットの日付が</span><input type="date" id="kbUntil" aria-label="この日まで"><span>までの</span>
+      <select id="kbCar" aria-label="運送会社"><option value="">全部の運送会社</option></select>
+      <span>の未回収を</span>
+      <button class="btn" id="kbMark">回収済みにする</button>
+      <span class="kbmsg" id="kbMsg"></span>
+    </div>
+    <div class="scroll" id="kbLeft"></div>
+  </section>
+  <section class="card wide">
+    <h2>この日の看板回収</h2>
+    <div class="scroll" id="kbDone"></div>
   </section>
   <section class="card">
     <h2>担当者別</h2>
@@ -398,6 +542,7 @@ function render(st) {
     }).join('') + '</tbody></table>' : '<div class="empty">この日の記録はありません</div>';
 
   $('recent').innerHTML = st.recent.length ? palletTable(st.recent, 'r', true) : '<div class="empty">この日の記録はありません</div>';
+  renderKanban(st.kanban);
 
   Array.prototype.forEach.call(document.querySelectorAll('tr.row'), function (tr) {
     tr.addEventListener('click', function () { toggleRow(tr); });
@@ -406,6 +551,118 @@ function render(st) {
   /* 開いたままのパレットで、管理番号がまだ手元に無いものは取りに行く */
   Array.prototype.forEach.call(document.querySelectorAll('tr.pal.open'), function (tr) { fillCodes(tr.dataset.p); });
 }
+
+/* ===== 看板回収 ===== */
+function md(ms) {
+  if (!ms) return '—';
+  var t = new Date(ms);
+  return (t.getMonth() + 1) + '/' + t.getDate() + ' ' + hm(ms);
+}
+function renderKanban(k) {
+  k = k || { carriers: [], pallets: 0, boxes: 0, done: [] };
+  var sel = $('kbCar'), keep = sel.value;
+  sel.innerHTML = '<option value="">全部の運送会社</option>' + k.carriers.map(function (c) {
+    return '<option value="' + esc(c.name) + '"' + (c.name === keep ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+  }).join('');
+
+  $('kbLeft').innerHTML = k.carriers.length
+    ? '<div class="kbsum">未回収 <b class="num">' + n(k.pallets) + '</b>枚・<b class="num">' + n(k.boxes) + '</b>箱</div>' +
+      '<table class="cars"><colgroup><col class="c-tw"><col class="c-cd"><col class="c-name"><col class="c-n"><col class="c-n"><col class="c-day opt"></colgroup>' +
+      '<thead><tr><th></th><th><span class="opt">運送会社</span>CD</th><th>運送会社</th><th class="r">看板</th><th class="r">箱数</th><th class="r opt">いちばん古い日</th></tr></thead><tbody>' +
+      k.carriers.map(function (c) {
+        var key = 'k|' + c.name, open = !!openRow[key];
+        return '<tr class="row car' + (open ? ' open' : '') + '" data-k="' + esc(key) + '" tabindex="0" aria-expanded="' + open + '">' +
+          '<td class="tw">' + (open ? '▾' : '▸') + '</td><td class="num">' + esc(c.cd || '—') + '</td><td class="name strong">' + esc(c.name) + '</td>' +
+          '<td class="r num strong">' + n(c.pallets) + '</td><td class="r num">' + n(c.boxes) + '</td><td class="r num opt">' + fmtDay(c.oldest) + '</td></tr>' +
+          '<tr class="sub"' + (open ? '' : ' hidden') + '><td></td><td colspan="5">' + leftTable(c.list) + '</td></tr>';
+      }).join('') + '</tbody></table>'
+    : '<div class="empty">戻っていない看板はありません</div>';
+
+  $('kbDone').innerHTML = k.done.length
+    ? '<table class="pals"><colgroup><col class="c-n"><col class="c-car"><col class="c-box"><col class="c-box"><col class="c-user"><col class="c-how opt"></colgroup>' +
+      '<thead><tr><th>回収時刻</th><th>運送会社</th><th class="r">看板</th><th class="r">箱数</th><th>担当</th><th class="opt">方法</th></tr></thead><tbody>' +
+      k.done.map(function (d) {
+        return '<tr><td class="num">' + hm(d.at) + '</td><td class="name strong">' + esc(d.carrier) + '</td><td class="r num strong">' + n(d.pallets) + '</td>' +
+          '<td class="r num">' + n(d.boxes) + '</td><td>' + esc(d.user) + '</td><td class="opt">' + esc(d.how) + '</td></tr>';
+      }).join('') + '</tbody></table>'
+    : '<div class="empty">この日の看板回収はありません</div>';
+
+  Array.prototype.forEach.call(document.querySelectorAll('button[data-mark]'), function (b) {
+    b.addEventListener('click', function (e) { e.stopPropagation(); markOne(b); });
+  });
+}
+function leftTable(list) {
+  return '<table class="pals"><colgroup><col class="c-pal"><col class="c-box"><col class="c-user"><col class="c-t opt"><col class="c-btn"></colgroup>' +
+    '<thead><tr><th>パレット番号</th><th class="r">箱数</th><th>担当</th><th class="r opt">パレット確定</th><th></th></tr></thead><tbody>' +
+    list.map(function (p) {
+      return '<tr><td class="mono">' + esc(p.pallet) + '</td><td class="r num strong">' + n(p.boxes) + '</td><td>' + esc(p.user) + '</td>' +
+        '<td class="r num opt">' + md(p.last) + '</td><td class="r"><button class="btn sm" data-mark="' + esc(p.pallet) + '">回収済みにする</button></td></tr>';
+    }).join('') + '</tbody></table>';
+}
+
+/* 書き込みは取り消せないので、どちらも2回押しで実行する（1回目で確認の表示に変わる） */
+function markOne(b) {
+  if (!b.classList.contains('arm')) {
+    b.classList.add('arm');
+    b.textContent = 'もう一度押すと実行';
+    setTimeout(function () { if (b.isConnected && !b.disabled) { b.classList.remove('arm'); b.textContent = '回収済みにする'; } }, 5000);
+    return;
+  }
+  b.disabled = true;
+  b.textContent = '記録中…';
+  runMark({ pallet: b.dataset.mark, day: current }, function () {}, function (e) { b.disabled = false; b.classList.remove('arm'); b.textContent = '失敗（' + e + '）'; });
+}
+var bulkArmed = null;
+function bulkPick() {
+  var until = $('kbUntil').value.replace(/-/g, ''), car = $('kbCar').value, k = lastSt && lastSt.kanban;
+  var out = { until: until, carrier: car, pallets: 0, boxes: 0 };
+  if (!k || !/^\\d{8}$/.test(until)) return out;
+  k.carriers.forEach(function (c) {
+    if (car && c.name !== car) return;
+    c.list.forEach(function (p) { if (p.pallet.slice(0, 8) <= until) { out.pallets++; out.boxes += p.boxes; } });
+  });
+  return out;
+}
+function disarmBulk() {
+  bulkArmed = null;
+  $('kbMark').classList.remove('arm');
+  $('kbMark').textContent = '回収済みにする';
+}
+$('kbUntil').onchange = $('kbCar').onchange = function () { disarmBulk(); $('kbMsg').textContent = ''; };
+$('kbMark').onclick = function () {
+  var msg = $('kbMsg');
+  msg.className = 'kbmsg';
+  var pick = bulkPick();
+  if (!/^\\d{8}$/.test(pick.until)) { msg.className = 'kbmsg bad'; msg.textContent = '日付を選んでください'; return; }
+  if (!pick.pallets) { disarmBulk(); msg.textContent = '対象の看板はありません'; return; }
+  if (!bulkArmed || bulkArmed.until !== pick.until || bulkArmed.carrier !== pick.carrier) {
+    bulkArmed = pick;
+    $('kbMark').classList.add('arm');
+    $('kbMark').textContent = 'もう一度押すと実行';
+    msg.textContent = (pick.carrier || '全部の運送会社') + ' の ' + n(pick.pallets) + ' 枚（' + n(pick.boxes) + ' 箱）を回収済みにします';
+    return;
+  }
+  $('kbMark').disabled = true;
+  msg.textContent = '記録中…';
+  runMark({ until: pick.until, carrier: pick.carrier, day: current }, function (cnt) {
+    $('kbMark').disabled = false; disarmBulk();
+    msg.textContent = n(cnt) + ' 枚を回収済みにしました';
+  }, function (e) {
+    $('kbMark').disabled = false; disarmBulk();
+    msg.className = 'kbmsg bad'; msg.textContent = '記録できません（' + e + '）';
+  });
+};
+function runMark(opt, done, fail) {
+  google.script.run
+    .withSuccessHandler(function (cnt) { done(cnt); load(); })
+    .withFailureHandler(function (e) { fail(e && e.message || e); })
+    .markCollected(opt);
+}
+/* 既定は昨日まで（今日のパレットは、まだ看板が戻ってくる途中のことが多い） */
+(function () {
+  var t = new Date(Date.now() - 86400000);
+  $('kbUntil').value = t.getFullYear() + '-' + ('0' + (t.getMonth() + 1)).slice(-2) + '-' + ('0' + t.getDate()).slice(-2);
+})();
 
 /* パレットの表。押すと管理番号の一覧が開く。withCarrier: 運送会社の列を出すか */
 function palletTable(list, scope, withCarrier) {

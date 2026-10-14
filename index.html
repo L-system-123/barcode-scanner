@@ -385,6 +385,24 @@
   .hit .reprint, .pal .reprint { margin-top: 6px; min-height: 34px; padding: 5px 12px; font-size: 12.5px; }
   .hit .reprint { display: block; }
   .pal .reprint { margin: 0 0 10px; }
+  /* ---- 看板回収チェック ---- */
+  .kb { border-left-color: var(--accent); }
+  .kb .pcol.pnum + .pcol { text-align: right; }
+  #kbPal, #kbBox { font-size: 30px; font-family: "JetBrains Mono", monospace; }
+  .kblist { font-size: 13px; }
+  .kblist td { padding: 6px 6px; white-space: normal; }
+  .kblist td.c { white-space: nowrap; }
+  .kblist td:last-child { text-align: right; padding: 2px 0 2px 4px; }
+  .kblist tr.ok td:nth-child(2) { color: var(--ok); font-weight: 700; }
+  .kblist tr.bad td { color: var(--signal); font-weight: 700; }
+  .kblist tr.off td { color: var(--ink-2); }
+  .kblist tr.off td.c { text-decoration: line-through; }
+  .kblist tr.wait td:nth-child(2) { color: var(--ink-2); }
+  details.kbleft { width: 100%; border-top: 1px solid var(--line); padding-top: 8px; }
+  details.kbleft > summary { cursor: pointer; font-weight: 700; font-size: 13.5px; }
+  .kb .kblist { width: 100%; }
+  /* QR は四角いので、読み取り枠も四角に近づける（grabROI の ROI と合わせる） */
+  .stage.qr .reticle { inset: 22% 14%; }
   #prnState { font-size: 13px; color: var(--ink-2); }
   #prnState b { font-family: "JetBrains Mono", monospace; color: var(--ink); }
   tr.sample td { color: var(--ink-2); font-style: italic; }
@@ -451,6 +469,32 @@
     <span>ズーム</span>
     <input type="range" id="zoom" min="1" max="1" step="0.1" value="1">
     <span id="zoomV">1.0×</span>
+  </div>
+
+  <!-- 看板回収チェックの間だけ、パレットの欄の代わりに出す -->
+  <div class="pallet kb" id="kbCard" hidden>
+    <div class="pcol">
+      <span class="label">看板回収・運送会社</span>
+      <span class="pv" id="kbCarrier">—</span>
+    </div>
+    <div class="pcol pnum">
+      <span class="label">看板</span>
+      <span class="pv" id="kbPal">0</span>
+    </div>
+    <div class="pcol">
+      <span class="label">箱数</span>
+      <span class="pv" id="kbBox">0</span>
+    </div>
+    <div class="pbtns">
+      <button id="kbCommit" class="go" disabled>回収を確定</button>
+      <button id="kbEnd">終わる</button>
+    </div>
+    <div class="sendstat" id="kbStat"></div>
+    <table class="kblist"><tbody id="kbList"></tbody></table>
+    <details class="kbleft" id="kbLeftBox" open hidden>
+      <summary id="kbLeftSum"></summary>
+      <table class="kblist"><tbody id="kbLeft"></tbody></table>
+    </details>
   </div>
 
   <div class="pallet" id="palletCard">
@@ -556,6 +600,14 @@
     <div id="todayMsg"></div>
     <div id="todayList"></div>
     <div class="empty">今日確定したパレットはまだありません</div>
+  </section>
+
+  <section class="card">
+    <div class="cardhead">
+      <h2>看板回収チェック</h2>
+      <button id="kbStart">始める</button>
+    </div>
+    <div class="sub" style="margin:0">ドライバーが回収した看板のQRを読み、運送会社の混ざりと箱数の合計を確かめます</div>
   </section>
 
   <section class="card">
@@ -1059,6 +1111,11 @@ var DIAG = {
 var WIDE_FORMATS = ['codabar','code_128','code_39','itf','ean_13','ean_8','upc_a','upc_e','qr_code'];
 
 var ROI = { x: 0.06, y: 0.34, w: 0.88, h: 0.32 };
+/* QR を読む間（プリンター登録・看板回収）は四角に近い枠にする。CSS の .stage.qr .reticle { inset: 22% 14% } と合わせる */
+function setQrFrame(on) {
+  stage.classList.toggle('qr', on);
+  ROI = on ? { x: 0.14, y: 0.22, w: 0.72, h: 0.56 } : { x: 0.06, y: 0.34, w: 0.88, h: 0.32 };
+}
 /* 拡大は画素数を増やす＝そのぶん遅くなる。解像度を上げて枠を狭める方が速い。
    1080p で読めない時だけ 2 に上げる（速度と引き換え） */
 var ROI_SCALE = 1;
@@ -1287,6 +1344,7 @@ function loopZXing() {
 function handle(raw, decodeMs, format, skipFilter) {
   if (asking) return;
   if (prnMode) { readPrinterQr(raw); return; }
+  if (kbMode) { readKanban(raw); return; }
   var now = performance.now();
   /* 同じコードの連打を1.5秒間は無視する。実運用では必須 */
   if (raw === lastCode && now - lastCodeAt < 1500) return;
@@ -1508,7 +1566,7 @@ $('manual').addEventListener('keydown', function (e) {
    接続先URL・ログイン状態・送信待ちは端末の localStorage に置く。
    URLはリポジトリに書かない（公開なので、書くと誰でも叩ける）。初回だけ画面で貼ってもらう。
    パスワードは端末に残さない。ログインで受け取った期限付きのトークンだけを持つ。 */
-var KEY = { api: 'scan.api', token: 'scan.token', user: 'scan.user', master: 'scan.master', outbox: 'scan.outbox', printer: 'scan.printer' };
+var KEY = { api: 'scan.api', token: 'scan.token', user: 'scan.user', master: 'scan.master', outbox: 'scan.outbox', printer: 'scan.printer', kanban: 'scan.kanban' };
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch (e) {} }
 
@@ -1868,13 +1926,15 @@ function showPrinter() {
     el.appendChild(document.createTextNode('登録済み '));
     var b = document.createElement('b'); b.textContent = mac; el.appendChild(b);
   } else {
-    el.textContent = '未登録（共用のプリンターから出ます）';
+    el.textContent = '未登録（ラベルは出ません）';
   }
   $('prnReg').textContent = prnMode ? 'やめる' : (mac ? '登録し直す' : 'プリンターを登録');
 }
 function setPrnMode(on) {
+  if (on && kbMode) leaveKbMode();
   prnMode = on;
   FORMATS = on ? ['qr_code', 'code_128'] : ['codabar'];
+  setQrFrame(on);
   showPrinter();
   $('code').textContent = on ? 'プリンターのQR' : '—';
   $('band').textContent = on ? 'プリンターに貼ったQR・バーコードを枠に入れてください' : '待機中';
@@ -1911,6 +1971,255 @@ async function readPrinterQr(raw) {
   }).then(function () { prnBusy = false; });
 }
 showPrinter();
+
+/* ===== 看板回収チェック =====
+   ドライバーが回収した看板（ラベルのQR。中身はパレット番号だけ）を次々に読む。
+   運送会社・箱数は手元に無いので、読むたびに読んだ看板の一覧を Apps Script に送って判定してもらう
+   （基準の運送会社＝最初に読んだ、記録にあって未回収の看板。名前で比べ、配送CDの違いは問わない）。
+   同じ看板の二度読みだけは手元で分かるので、その場で止める。
+   読んだ一覧は端末に残す（画面を閉じても続きから読める）。確定すると 看板回収 タブに書かれる */
+var KB_RE = /^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}$/;
+var KB_MAX = 300;
+var kbMode = false, kbBusy = false, kbAgain = false, kbSending = false, kbTimer = null;
+var kbLastRaw = '', kbLastAt = 0;
+var kb = kbLoad();
+function kbNew() { return { list: [], info: {}, base: '', left: null, alerted: {} }; }
+function kbLoad() {
+  try {
+    var s = JSON.parse(lsGet(KEY.kanban) || 'null');
+    if (s && Array.isArray(s.list)) { s.info = s.info || {}; s.alerted = s.alerted || {}; return s; }
+  } catch (e) {}
+  return kbNew();
+}
+function kbSave() { lsSet(KEY.kanban, kb.list.length ? JSON.stringify(kb) : null); }
+function kbStat(msg, cls) { $('kbStat').textContent = msg; $('kbStat').className = 'sendstat' + (cls ? ' ' + cls : ''); }
+
+function setKbMode(on) {
+  if (on && prnMode) { prnMode = false; showPrinter(); }
+  kbMode = on;
+  FORMATS = on ? ['qr_code'] : ['codabar'];
+  setQrFrame(on);
+  $('kbCard').hidden = !on;
+  $('palletCard').hidden = on;
+  $('kbStart').textContent = on ? '終わる' : (kb.list.length ? '続きから' : '始める');
+  clearAlert();
+  kbLastRaw = '';
+  $('code').textContent = on ? '看板のQR' : '—';
+  $('band').textContent = on ? '看板のQRを枠に入れてください' : '待機中';
+  $('band').style.color = '';
+  $('readout').style.borderLeftColor = 'var(--line)';
+  if (running) stop();
+  start();
+  if (on) { kbRender(); window.scrollTo(0, 0); if (kb.list.length) kbSync(); }
+}
+/* プリンター登録に切り替える時用。カメラは呼んだ側で開き直す */
+function leaveKbMode() {
+  kbMode = false;
+  $('kbCard').hidden = true;
+  $('palletCard').hidden = false;
+  $('kbStart').textContent = kb.list.length ? '続きから' : '始める';
+}
+$('kbStart').textContent = kb.list.length ? '続きから' : '始める';
+$('kbStart').onclick = async function () {
+  armAudio();
+  if (kbMode) { kbFinish(); return; }
+  if (pallet.count && !await ask('読み取り中のパレットはそのまま残ります。看板回収チェックを始めますか？', '始める')) return;
+  setKbMode(true);
+};
+$('kbEnd').onclick = kbFinish;
+async function kbFinish() {
+  if (kb.list.length && !await ask('読んだ看板 ' + kb.list.length + ' 枚は記録されません。終わりますか？', '終わる')) return;
+  kb = kbNew();
+  kbSave();
+  kbStat('', '');
+  setKbMode(false);
+}
+
+function readKanban(raw) {
+  var no = String(raw).trim(), now = Date.now();
+  /* カメラを向けたままだと同じ看板が毎フレーム読める。それは二度読みではない */
+  if (no === kbLastRaw && now - kbLastAt < RESCAN_IDLE_MS) { kbLastAt = now; return; }
+  kbLastRaw = no; kbLastAt = now;
+  $('code').textContent = no.slice(0, 32);
+  $('band').style.color = '';
+  if (!KB_RE.test(no)) { $('band').textContent = '看板のQRではありません'; return; }
+  if (kb.list.indexOf(no) >= 0) {
+    $('band').textContent = '読み取り済みの看板です（数には足していません）';
+    raiseAlert('warn', '同じ看板', no + ' はもう読んでいます。数には足していません');
+    return;
+  }
+  if (kb.list.length >= KB_MAX) { $('band').textContent = '1回に読めるのは ' + KB_MAX + ' 枚までです。いったん確定してください'; return; }
+  kb.list.push(no);
+  kbSave();
+  beep();
+  $('band').textContent = '確認しています…';
+  kbRender();
+  kbSync();
+}
+
+/* 読んだ一覧をまるごと送って判定し直してもらう。送っている間に読んだ分は、返事が来てからもう一度 */
+function kbSync() {
+  if (kbBusy) { kbAgain = true; return; }
+  kbBusy = true; kbAgain = false;
+  clearTimeout(kbTimer);
+  var mine = kb;
+  api({ action: 'kanban', token: lsGet(KEY.token), pallets: kb.list.slice() }).then(function (r) {
+    if (kb !== mine) return;   // 返事を待つ間に終わった・確定した
+    if (r.error === 'auth') { lsSet(KEY.token, null); showLogin('ログインの期限が切れました'); return; }
+    if (!r.ok) { kbStat('確認できません（' + r.error + '）', 'bad'); return; }
+    kbApply(r);
+    if (!kbSending) kbStat('', '');
+  }).catch(function () {
+    if (kb !== mine) return;
+    kbStat('通信できません。電波が戻ったら自動で確認します', 'bad');
+    kbTimer = setTimeout(kbSync, 5000);
+  }).then(function () {
+    kbBusy = false;
+    if (kbAgain) kbSync();
+  });
+}
+
+function kbApply(r) {
+  kb.base = r.base || '';
+  if (r.left) kb.left = r.left;
+  kb.info = {};
+  (r.items || []).forEach(function (it) { kb.info[it.pallet] = it; });
+  kbSave();
+  kbWarn();
+  kbRender();
+}
+
+/* 判定が返ってきた看板のうち、まだ知らせていない問題を1回だけ知らせる */
+function kbWarn() {
+  var bad = [];
+  kb.list.forEach(function (no) {
+    var it = kb.info[no];
+    if (it && it.state !== 'ok' && !kb.alerted[no]) { bad.push(it); kb.alerted[no] = true; }
+  });
+  var last = kb.info[kb.list[kb.list.length - 1]];
+  if (last && last.state === 'ok') {
+    $('band').textContent = last.carrier + '  ' + last.count + '箱';
+    $('band').style.color = '';
+  }
+  if (!bad.length) return;
+  kbSave();
+  var mixed = bad.filter(function (it) { return it.state === 'mixed'; });
+  if (mixed.length) {
+    $('band').textContent = '運送会社が違う — ' + mixed[mixed.length - 1].carrier;
+    $('band').style.color = 'var(--signal)';
+    raiseAlert('danger', '運送会社が違う',
+      mixed.map(function (it) { return it.pallet + ' は「' + it.carrier + '」'; }).join('\n') +
+      '\nこのチェックは「' + kb.base + '」です。看板を分けて、一覧の × で外してください');
+    return;
+  }
+  var it = bad[bad.length - 1];
+  if (it.state === 'collected') {
+    $('band').textContent = '回収済みの看板です';
+    raiseAlert('warn', '回収済みの看板', it.pallet + ' は ' + mdhm(it.at) + ' に回収済みです' + (it.by ? '（' + it.by + '）' : '') + '。数には足していません');
+  } else {
+    $('band').textContent = '記録にない看板です';
+    raiseAlert('warn', '記録にない看板', it.pallet + ' はスキャン記録にありません。数には足していません');
+  }
+}
+function mdhm(ms) {
+  if (!ms) return '—';
+  var t = new Date(ms);
+  return (t.getMonth() + 1) + '/' + t.getDate() + ' ' + hhmm(ms);
+}
+
+function kbTotals() {
+  var t = { pallets: 0, boxes: 0, mixed: 0, wait: 0 };
+  kb.list.forEach(function (no) {
+    var it = kb.info[no];
+    if (!it) t.wait++;
+    else if (it.state === 'ok') { t.pallets++; t.boxes += it.count; }
+    else if (it.state === 'mixed') t.mixed++;
+  });
+  return t;
+}
+
+function kbRender() {
+  var t = kbTotals();
+  $('kbCarrier').textContent = kb.base || '—';
+  $('kbPal').textContent = t.pallets;
+  $('kbBox').textContent = t.boxes;
+  $('kbCommit').disabled = kbSending || !t.pallets || t.mixed > 0 || t.wait > 0;
+
+  var tb = $('kbList');
+  tb.innerHTML = '';
+  kb.list.slice().reverse().forEach(function (no) {   // 新しく読んだ看板を上に
+    var it = kb.info[no], st, cls;
+    if (!it) { st = '確認中…'; cls = 'wait'; }
+    else if (it.state === 'ok') { st = it.count + '箱'; cls = 'ok'; }
+    else if (it.state === 'mixed') { st = '運送会社が違う（' + it.carrier + '）'; cls = 'bad'; }
+    else if (it.state === 'collected') { st = '回収済み（' + mdhm(it.at) + (it.by ? ' ' + it.by : '') + '）'; cls = 'off'; }
+    else { st = '記録にありません'; cls = 'off'; }
+    var tr = tb.insertRow();
+    tr.className = cls;
+    var c = tr.insertCell(); c.className = 'c'; c.textContent = no;
+    tr.insertCell().textContent = st;
+    var b = document.createElement('button');
+    b.className = 'rm'; b.textContent = '×'; b.setAttribute('aria-label', no + ' を外す');
+    b.onclick = function () {
+      kb.list = kb.list.filter(function (x) { return x !== no; });
+      delete kb.info[no]; delete kb.alerted[no];
+      if (no === kbLastRaw) kbLastRaw = '';
+      kbSave();
+      kbRender();
+      if (kb.list.length) kbSync(); else { kb = kbNew(); kbSave(); kbRender(); }
+    };
+    tr.insertCell().appendChild(b);
+  });
+
+  /* 基準の運送会社で、まだ戻っていない看板（期間を絞らず全部） */
+  var box = $('kbLeftBox');
+  box.hidden = !kb.base || !kb.left;
+  if (box.hidden) return;
+  $('kbLeftSum').textContent = kb.left.length
+    ? 'まだ戻っていない看板（' + kb.base + '）' + kb.left.length + ' 枚'
+    : 'まだ戻っていない看板（' + kb.base + '）はありません';
+  var lb = $('kbLeft');
+  lb.innerHTML = '';
+  kb.left.forEach(function (p) {
+    var tr = lb.insertRow();
+    var c = tr.insertCell(); c.className = 'c'; c.textContent = p.pallet;
+    tr.insertCell().textContent = p.count + '箱';
+    tr.insertCell().textContent = p.user;
+  });
+}
+
+$('kbCommit').onclick = async function () {
+  armAudio();
+  var t = kbTotals();
+  if (!t.pallets || t.mixed || t.wait) return;
+  if (!await ask(kb.base + '\n看板 ' + t.pallets + ' 枚・' + t.boxes + ' 箱で回収を確定しますか？', '確定する')) return;
+  kbSending = true;
+  kbRender();
+  kbStat('記録しています…', '');
+  var mine = kb;
+  api({ action: 'collect', token: lsGet(KEY.token), pallets: kb.list.slice() }).then(function (r) {
+    if (kb !== mine) return;
+    if (r.error === 'auth') { lsSet(KEY.token, null); showLogin('ログインの期限が切れました'); return; }
+    if (!r.ok) {
+      if (r.error === 'mixed') { kbApply(r); kbStat('運送会社が違う看板があります。× で外してから確定してください', 'bad'); }
+      else kbStat('確定できません（' + r.error + '）', 'bad');
+      return;
+    }
+    /* 再送で、前に書けていた分は already に入ってくる */
+    var n = r.pallets + (r.already || 0), b = r.boxes + (r.alreadyBoxes || 0);
+    kb = kbNew();
+    kbSave();
+    beep();
+    $('code').textContent = r.carrier || '—';
+    $('band').textContent = '回収を記録しました';
+    kbStat('回収を記録しました：' + r.carrier + '  看板 ' + n + ' 枚・' + b + ' 箱。続けて次の看板を読めます', 'good');
+  }).catch(function () {
+    kbStat('通信できません。電波を確認して、もう一度「回収を確定」を押してください', 'bad');
+  }).then(function () {
+    kbSending = false;
+    kbRender();
+  });
+};
 
 $('todayReload').onclick = loadToday;
 $('todayAll').onchange = function () { todayOpen = {}; loadToday(); };

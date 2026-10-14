@@ -40,9 +40,14 @@
  *   確定するたびに「印刷待ち」を スクリプト プロパティ に積み（キー prt:パレット番号）、
  *   印刷係のPCが printQueue で取りに来て、出せたら printed で消す。シートは読まないので軽い。
  *   印刷係は ユーザー のログインではなく、スクリプト プロパティ PRINT_KEY と同じ値で通す。
- *   どのプリンターで出すかは ユーザー タブの H列（プリンターのMACアドレス）。空なら印刷係の既定のプリンター。
+ *   どのプリンターで出すかは ユーザー タブの H列（プリンターのMACアドレス）。空の人の分は印刷しない
+ *   （出なかったらプリンターを登録して再発行する運用）。
  *   H列はスキャン画面の「プリンターを登録」でプリンターに貼ったQR（PRN:MAC12桁）を読むと入る。
  *   再発行（reprint）は押した人のプリンターに出す。キーは prt:パレット番号-R時刻 で、最初の印刷と別に積む。
+ *
+ * ■ 看板回収チェック
+ *   ドライバーが回収してきた看板（ラベルのQR）を読み、kanban で判定、collect で実績シートの 看板回収 タブに書く。
+ *   タブは最初に使った時にできる。ダッシュボードからも「回収済みにする」で書く。
  */
 
 var SHEET_LOG = 'スキャン記録';
@@ -85,6 +90,8 @@ function doPost(e) {
       case 'done':   return reply(withUser(req, function () { return doneToday(); }));
       case 'setPrinter': return reply(withUser(req, function (user) { return setPrinter(req, user); }));
       case 'reprint':    return reply(withUser(req, function (user) { return reprint(req, user); }));
+      case 'kanban':     return reply(withUser(req, function () { return kanban(req); }));
+      case 'collect':    return reply(withUser(req, function (user) { return collect(req, user); }));
       case 'printQueue': return reply(withPrintKey(req, printQueue));
       case 'printed':    return reply(withPrintKey(req, printed));
       default:       return reply({ ok: false, error: 'bad_action' });
@@ -535,6 +542,125 @@ function reprint(req, user) {
   return { ok: true, pallet: no, count: cells.length };
 }
 
+/* ===== 看板回収チェック =====
+   ラベル（QR の中身はパレット番号）はパレットの看板に貼り、ドライバーが最後に回収してくる。
+   集まった看板を読んで、運送会社の混ざり・箱数の合計・まだ戻っていない看板を出し、確定したら 看板回収 タブに書く。
+   日付では弾かない（昨日以前のパレットでもよい）。運送会社は名前で比べる（配送CDの違いは問わない）。
+   基準の運送会社は、最初に読んだ「記録にあって、まだ回収していない」看板の運送会社 */
+var SHEET_COLLECT = '看板回収';
+var COLLECT_HEADER = ['パレット番号', '運送会社名', '箱数', '回収日時', 'ユーザーID', '方法'];
+var PALLET_RE = /^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}$/;
+var KANBAN_MAX = 300;   // 1回のチェックで読める看板の上限
+
+/* 実績シートの 看板回収 タブ。無ければ作る（実績シート準備を実行し直さなくても使えるように） */
+function collectSheet() {
+  var ss = logBook();
+  var sh = ss.getSheetByName(SHEET_COLLECT);
+  if (sh) return sh;
+  sh = ss.insertSheet(SHEET_COLLECT);
+  sh.appendRow(COLLECT_HEADER);
+  sh.setFrozenRows(1);
+  sh.getRange('A:A').setNumberFormat('@');
+  sh.getRange('D:D').setNumberFormat('yyyy/mm/dd hh:mm:ss');
+  sh.getRange('E:F').setNumberFormat('@');
+  protectForViewers(sh);
+  return sh;
+}
+
+/* スキャン記録をパレットごとにまとめる: { パレット番号: { carrier, cd, user, count } }。同じ箱が2行あっても1箱 */
+function palletIndex() {
+  var sh = logSheet(), last = sh.getLastRow(), idx = {}, seen = {};
+  if (last < 2) return idx;
+  sh.getRange(2, 1, last - 1, LOG_HEADER.length).getValues().forEach(function (r) {
+    var no = String(r[0]), k = no + '|' + r[2];
+    if (!no || seen[k]) return;
+    seen[k] = true;
+    var p = idx[no] || (idx[no] = { carrier: String(r[1]), cd: String(r[4]), user: String(r[5]), count: 0 });
+    p.count++;
+  });
+  return idx;
+}
+
+/* 回収済みのパレット: { パレット番号: { at, user } }。2回書かれていても最初の回収 */
+function collectedIndex(sh) {
+  var last = sh.getLastRow(), idx = {};
+  if (last < 2) return idx;
+  sh.getRange(2, 1, last - 1, COLLECT_HEADER.length).getValues().forEach(function (r) {
+    var no = String(r[0]);
+    if (no && !idx[no]) idx[no] = { at: r[3] instanceof Date ? r[3].getTime() : null, user: String(r[4]) };
+  });
+  return idx;
+}
+
+/* 読んだ順の看板を判定する。state: ok / mixed（運送会社が違う）/ collected（回収済み）/ missing（記録に無い） */
+function judgeKanban(list, pal, got) {
+  var base = '', seen = {}, items = [];
+  list.forEach(function (no) {
+    if (seen[no]) return;
+    seen[no] = true;
+    var p = pal[no];
+    if (!p) { items.push({ pallet: no, state: 'missing' }); return; }
+    var o = { pallet: no, carrier: p.carrier, cd: p.cd, user: p.user, count: p.count };
+    if (got[no]) { o.state = 'collected'; o.at = got[no].at; o.by = got[no].user; }
+    else if (!base) { base = p.carrier; o.state = 'ok'; }
+    else o.state = p.carrier === base ? 'ok' : 'mixed';
+    items.push(o);
+  });
+  return { base: base, items: items };
+}
+
+function kanbanList(req) {
+  var list = Array.isArray(req.pallets) ? req.pallets.map(String) : null;
+  if (!list || list.length > KANBAN_MAX) return null;
+  for (var i = 0; i < list.length; i++) if (!PALLET_RE.test(list[i])) return null;
+  return list;
+}
+
+/* 読んだ看板の中身と、基準の運送会社でまだ戻っていない看板（期間を絞らず全部）を返す */
+function kanban(req) {
+  var list = kanbanList(req);
+  if (!list) return { ok: false, error: 'bad_pallet' };
+  var pal = palletIndex(), got = collectedIndex(collectSheet());
+  var j = judgeKanban(list, pal, got);
+  var mine = {}, left = [];
+  list.forEach(function (no) { mine[no] = true; });
+  if (j.base) {
+    Object.keys(pal).forEach(function (no) {
+      var p = pal[no];
+      if (p.carrier === j.base && !got[no] && !mine[no]) left.push({ pallet: no, count: p.count, user: p.user, cd: p.cd });
+    });
+  }
+  left.sort(function (a, b) { return a.pallet < b.pallet ? -1 : a.pallet > b.pallet ? 1 : 0; });
+  return { ok: true, base: j.base, items: j.items, left: left };
+}
+
+/* 回収を確定する。運送会社が混ざっていたら書かない。回収済み・記録に無い看板は飛ばす。
+   再送されても、書いた分は回収済みになるので二重には書かない（already に入る） */
+function collect(req, user) {
+  var list = kanbanList(req);
+  if (!list || !list.length) return { ok: false, error: 'bad_pallet' };
+  var lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    var sh = collectSheet();
+    var j = judgeKanban(list, palletIndex(), collectedIndex(sh));
+    if (j.items.some(function (x) { return x.state === 'mixed'; })) return { ok: false, error: 'mixed', base: j.base, items: j.items };
+    var take = j.items.filter(function (x) { return x.state === 'ok'; });
+    var now = new Date();
+    if (take.length) {
+      sh.getRange(sh.getLastRow() + 1, 1, take.length, COLLECT_HEADER.length)
+        .setValues(take.map(function (x) { return [x.pallet, x.carrier, x.count, now, user, 'スキャン']; }));
+      SpreadsheetApp.flush();
+    }
+    var mineBefore = j.items.filter(function (x) { return x.state === 'collected' && normUser(x.by) === normUser(user); });
+    return { ok: true, carrier: j.base || (mineBefore[0] && mineBefore[0].carrier) || '',
+             pallets: take.length, boxes: take.reduce(function (a, x) { return a + x.count; }, 0),
+             already: mineBefore.length, alreadyBoxes: mineBefore.reduce(function (a, x) { return a + x.count; }, 0) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 /* ===== シートのメニュー ===== */
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('スキャン管理')
@@ -658,7 +784,7 @@ function 実績シート準備() {
     ss.moveActiveSheet(1);
     ss.setActiveSheet(ss.getSheetByName(SHEET_DETAIL));
     ss.moveActiveSheet(2);
-    [ss.getSheetByName(SHEET_DAILY), ss.getSheetByName(SHEET_DETAIL), log].forEach(protectForViewers);
+    [ss.getSheetByName(SHEET_DAILY), ss.getSheetByName(SHEET_DETAIL), log, collectSheet()].forEach(protectForViewers);
 
     var msg = '実績シートを準備しました。' + (moved === null ? '' : '\n移した記録: ' + moved + ' 行（元のタブは消しました）') +
       (dups ? '\n重複していた行を消しました: ' + dups + ' 行' : '');
