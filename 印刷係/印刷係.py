@@ -172,9 +172,7 @@ def label_of(job):
 
 
 def print_job(finder, conf, job):
-    mac = job.get("printer") or conf.get("default_printer", "")
-    if not norm_mac(mac):
-        raise RuntimeError(f"プリンターが決まっていません（担当 {job.get('user')}。ユーザー タブの H列か 設定.json の default_printer）")
+    mac = job.get("printer", "")
     _, data = ラベル.make(label_of(job))
     ip = finder.find(mac)
     try:
@@ -247,7 +245,10 @@ def run():
                 continue
             for job in r.get("jobs", []):
                 p = job.get("id") or job["pallet"]     # 再発行は パレット番号-R時刻 で別に来る
-                if p not in done:
+                if p not in done and not norm_mac(job.get("printer", "")):
+                    # プリンター未登録の人の分は出さない（GAS も入れないが、古い版で溜まった分のため）
+                    log(f"- {p}  プリンター未登録のため印刷しません（{job.get('name') or job.get('user')}）")
+                elif p not in done:
                     try:
                         print_job(finder, conf, job)
                     except Exception as e:
@@ -273,7 +274,10 @@ def run():
 def test():
     conf = load_conf()
     job = {"pallet": dt.date.today().strftime("%Y%m%d") + "-TEST-001", "carrier": "サンプル運送", "cd": "0841",
-           "count": 24, "at": time.time() * 1000, "user": "TEST", "name": "テスト担当", "printer": ""}
+           "count": 24, "at": time.time() * 1000, "user": "TEST", "name": "テスト担当", "printer": conf.get("default_printer", "")}
+    if not norm_mac(job["printer"]):
+        log("設定.json の default_printer にプリンターのMACアドレスを書いてください")
+        return
     print_job(Finder(), conf, job)
     log("見本を1枚送りました")
 

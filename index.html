@@ -1846,7 +1846,7 @@ function reprintButton(no) {
     api({ action: 'reprint', token: lsGet(KEY.token), pallet: no }).then(function (r) {
       if (r.ok) { b.textContent = '依頼しました（' + r.count + '箱）'; return; }
       if (r.error === 'auth') { lsSet(KEY.token, null); showLogin('ログインの期限が切れました'); return; }
-      b.textContent = '依頼できません（' + r.error + '）';
+      b.textContent = r.error === 'no_printer' ? 'プリンターが未登録です（「プリンターを登録」から）' : '依頼できません（' + r.error + '）';
       b.disabled = false;
     }).catch(function () {
       b.textContent = '依頼できません。電波を確認してもう一度';

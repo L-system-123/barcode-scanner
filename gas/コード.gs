@@ -456,11 +456,13 @@ function purgeDone(props) {
 }
 
 /* ===== ラベル印刷 ===== */
-/* job.printer を先に決めてあればそれを使う（再発行は押した人のプリンター） */
+/* job.printer を先に決めてあればそれを使う（再発行は押した人のプリンター）。
+   プリンターを登録していない人の分は印刷しない（出なかったら登録して再発行する運用） */
 function queuePrint(props, job) {
   var u = findUser(usersSheet(), normUser(job.user));
   job.name = u ? String(u.values[U_NAME - 1] || '').trim() : '';
   if (job.printer === undefined) job.printer = u ? String(u.values[U_PRINTER - 1] || '').trim() : '';
+  if (!job.printer) return;
   job.id = job.id || job.pallet;
   props.setProperty('prt:' + job.id, JSON.stringify(job));
   var keys = Object.keys(props.getProperties()).filter(function (k) { return k.indexOf('prt:') === 0; }).sort();
@@ -525,6 +527,7 @@ function reprint(req, user) {
     if (r[3] instanceof Date) at = Math.max(at, r[3].getTime());
   });
   var me = findUser(usersSheet(), normUser(user));
+  if (!me || !String(me.values[U_PRINTER - 1] || '').trim()) return { ok: false, error: 'no_printer' };
   var job = { id: no + '-R' + Date.now(), pallet: no, carrier: String(first[1]), cd: String(first[4]), count: cells.length,
               at: at || Date.now(), user: String(first[5]), reprint: true,
               printer: me ? String(me.values[U_PRINTER - 1] || '').trim() : '' };
