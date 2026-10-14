@@ -2,15 +2,14 @@
 GAS の印刷待ち（確定したパレット）を数秒ごとに取りに行き、担当のプリンターへ Wi-Fi で送る。
 プリンターは MAC アドレスで指定し、IP はその場で探す（DHCP で変わってもよいように）。
 
-  label-printer.exe（python 印刷係.py）  … 常駐して印刷する（画面なし版。様子は 印刷係.log）
-  label-printer-tool.exe                … 同じものを黒い画面つきで動かす（様子を見ながら試す時）
-  label-printer-tool.exe --install      … ログイン時の自動起動を設定して、今すぐ起動する
-  label-printer-tool.exe --uninstall    … 自動起動をやめて止める
-  label-printer-tool.exe --status       … 動いているかと最近の記録
-  label-printer-tool.exe --stop         … 止める
-  label-printer-tool.exe --test         … 既定のプリンターに見本を1枚出す
-  label-printer-tool.exe --qr [MAC]     … そのプリンターに、本体に貼る登録用QRを出す
-2つは同じプログラムで、exe にする時に画面を出すかどうかだけが違う。
+  label-printer.exe（python 印刷係.py）  … 黒い画面つきで常駐して印刷する（閉じると止まる。記録は 印刷係.log にも残る）
+  label-printer.exe --install           … ログイン時の自動起動を設定して、今すぐ起動する
+  label-printer.exe --uninstall         … 自動起動をやめて止める
+  label-printer.exe --status            … 動いているかと最近の記録
+  label-printer.exe --stop              … 止める
+  label-printer.exe --test              … 既定のプリンターに見本を1枚出す
+  label-printer.exe --qr [MAC]          … そのプリンターに、本体に貼る登録用QRを出す
+画面が出ていないと止まっているように見えて現場が心配するので、常駐も画面つきにしている。
 exe の名前を英数字にしているのは、bat に日本語を書くとコマンドプロンプトの文字コード次第で化けるため。
 設定は同じフォルダの 設定.json（公開しない）。
 """
@@ -197,17 +196,29 @@ def load_done():
         return {x.strip() for x in f if x.startswith(today)}
 
 
+MUTEX = r"Local\PalletLabelPrinter"
+
+
+def set_title(text):
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW(text)
+    except Exception:
+        pass
+
+
 def only_one():
     """2つ目が起動したら False。同じ依頼を2つの印刷係が同時に出して二重になるのを防ぐ"""
     import ctypes
     k = ctypes.windll.kernel32
-    only_one.handle = k.CreateMutexW(None, False, r"Local\PalletLabelPrinter")
+    only_one.handle = k.CreateMutexW(None, False, MUTEX)
     return k.GetLastError() != 183    # ERROR_ALREADY_EXISTS
 
 
 def run():
     if not only_one():
         log("印刷係はすでに動いています（2つ目は起動しません）")
+        time.sleep(5)
         return
     conf = load_conf()
     finder = Finder()
@@ -215,8 +226,15 @@ def run():
     done = load_done()        # 印刷したのに「印刷済み」を返せなかった分を二度出さないため
     unsent = set()
     errors = {}
-    log("印刷係を開始しました" + ("（止めるときはこの画面を閉じる）" if sys.stdout else "（止めるときは 止める.bat）"))
+    if sys.stdout:
+        print("=" * 56)
+        print("  パレットラベルの印刷係です。")
+        print("  この画面を閉じると、ラベルの印刷が止まります。")
+        print("  （最小化は大丈夫です）")
+        print("=" * 56)
+    log("印刷係を開始しました")
     while True:
+        set_title("印刷係 - 動いています（最終確認 " + dt.datetime.now().strftime("%H:%M:%S") + "）  閉じると止まります")
         try:
             wifi.check()
             if unsent:
@@ -275,7 +293,7 @@ def qr_tag():
 
 
 # ===== 自動起動まわり（bat から呼ぶ） =====
-AGENT = "label-printer.exe"
+AGENT = "label-printer.exe"   # 常駐も操作も同じ exe。区別は引数の有無
 LNK_PATH = "(Join-Path ([Environment]::GetFolderPath('Startup')) '印刷係.lnk')"   # PowerShell の式
 
 
@@ -288,8 +306,12 @@ def _ps(script):
 
 
 def _running():
-    out = subprocess.run(["tasklist", "/fi", f"imagename eq {AGENT}"], capture_output=True, text=True, errors="replace").stdout
-    return AGENT.lower() in out.lower()
+    """常駐している印刷係がいるか。同じ exe を --status で動かしている自分を数えないよう、Mutex で見る"""
+    import ctypes
+    h = ctypes.windll.kernel32.OpenMutexW(0x00100000, False, MUTEX)   # SYNCHRONIZE
+    if h:
+        ctypes.windll.kernel32.CloseHandle(h)
+    return bool(h)
 
 
 def install():
@@ -305,9 +327,9 @@ $s.Save()""")
         print("自動起動を設定できませんでした: " + r.stderr.strip())
         return
     if not _running():
-        subprocess.Popen([exe], cwd=HERE, creationflags=0x00000008)   # DETACHED_PROCESS
+        subprocess.Popen([exe], cwd=HERE, creationflags=0x00000010)   # CREATE_NEW_CONSOLE（黒い画面を別に開く）
         time.sleep(3)
-    print("自動起動を設定しました。次から Windows にログインすると自動で動きます（画面には出ません）。")
+    print("自動起動を設定しました。次から Windows にログインすると、印刷係の黒い画面が自動で開きます。")
     want = load_conf().get("wifi", "")
     if want:
         r = subprocess.run(["netsh", "wlan", "set", "profileparameter", f"name={want}", "connectionmode=auto"],
@@ -325,7 +347,9 @@ def stop_agent():
     if not _running():
         print("印刷係は動いていませんでした")
         return
-    subprocess.run(["taskkill", "/im", AGENT, "/f"], capture_output=True)
+    # 引数なしで動いている（＝常駐している）ものだけ止める。--stop を実行中の自分は止めない
+    _ps(f"Get-CimInstance Win32_Process -Filter \"Name='{AGENT}'\" | Where-Object {{ $_.CommandLine -notmatch ' --' }} | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }")
     print("印刷係を止めました")
 
 
