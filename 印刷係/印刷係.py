@@ -2,9 +2,16 @@
 GAS の印刷待ち（確定したパレット）を数秒ごとに取りに行き、担当のプリンターへ Wi-Fi で送る。
 プリンターは MAC アドレスで指定し、IP はその場で探す（DHCP で変わってもよいように）。
 
-  印刷係.exe（python 印刷係.py）  … 常駐して印刷する
-  印刷係.exe --test              … 既定のプリンターに見本を1枚出す
-  印刷係.exe --qr [MAC]          … そのプリンターに、本体に貼る登録用QRを出す
+  label-printer.exe（python 印刷係.py）  … 常駐して印刷する（画面なし版。様子は 印刷係.log）
+  label-printer-tool.exe                … 同じものを黒い画面つきで動かす（様子を見ながら試す時）
+  label-printer-tool.exe --install      … ログイン時の自動起動を設定して、今すぐ起動する
+  label-printer-tool.exe --uninstall    … 自動起動をやめて止める
+  label-printer-tool.exe --status       … 動いているかと最近の記録
+  label-printer-tool.exe --stop         … 止める
+  label-printer-tool.exe --test         … 既定のプリンターに見本を1枚出す
+  label-printer-tool.exe --qr [MAC]     … そのプリンターに、本体に貼る登録用QRを出す
+2つは同じプログラムで、exe にする時に画面を出すかどうかだけが違う。
+exe の名前を英数字にしているのは、bat に日本語を書くとコマンドプロンプトの文字コード次第で化けるため。
 設定は同じフォルダの 設定.json（公開しない）。
 """
 import concurrent.futures as cf
@@ -31,7 +38,8 @@ PORT = 9100
 
 def log(msg):
     line = dt.datetime.now().strftime("%m/%d %H:%M:%S ") + msg
-    print(line, flush=True)
+    if sys.stdout:          # 画面なし版では stdout が無い
+        print(line, flush=True)
     with open(LOG, "a", encoding="utf-8-sig") as f:
         f.write(line + "\n")
 
@@ -157,13 +165,24 @@ def load_done():
         return {x.strip() for x in f if x.startswith(today)}
 
 
+def only_one():
+    """2つ目が起動したら False。同じ依頼を2つの印刷係が同時に出して二重になるのを防ぐ"""
+    import ctypes
+    k = ctypes.windll.kernel32
+    only_one.handle = k.CreateMutexW(None, False, r"Local\PalletLabelPrinter")
+    return k.GetLastError() != 183    # ERROR_ALREADY_EXISTS
+
+
 def run():
+    if not only_one():
+        log("印刷係はすでに動いています（2つ目は起動しません）")
+        return
     conf = load_conf()
     finder = Finder()
     done = load_done()        # 印刷したのに「印刷済み」を返せなかった分を二度出さないため
     unsent = set()
     errors = {}
-    log("印刷係を開始しました（止めるときはこの画面を閉じる）")
+    log("印刷係を開始しました" + ("（止めるときはこの画面を閉じる）" if sys.stdout else "（止めるときは 止める.bat）"))
     while True:
         try:
             if unsent:
@@ -221,14 +240,86 @@ def qr_tag():
     log(f"{norm_mac(mac)} に登録用QRを出しました")
 
 
+# ===== 自動起動まわり（bat から呼ぶ） =====
+AGENT = "label-printer.exe"
+LNK_PATH = "(Join-Path ([Environment]::GetFolderPath('Startup')) '印刷係.lnk')"   # PowerShell の式
+
+
+def _ps(script):
+    """日本語を含む PowerShell をそのまま渡す（-EncodedCommand は UTF-16 なので化けない）"""
+    import base64
+    enc = base64.b64encode(script.encode("utf-16-le")).decode()
+    return subprocess.run(["powershell", "-NoProfile", "-EncodedCommand", enc],
+                          capture_output=True, text=True, errors="replace")
+
+
+def _running():
+    out = subprocess.run(["tasklist", "/fi", f"imagename eq {AGENT}"], capture_output=True, text=True, errors="replace").stdout
+    return AGENT.lower() in out.lower()
+
+
+def install():
+    exe = os.path.join(HERE, AGENT)
+    if not os.path.exists(exe):
+        print(f"{AGENT} が同じフォルダにありません")
+        return
+    r = _ps(f"""$s = (New-Object -ComObject WScript.Shell).CreateShortcut({LNK_PATH})
+$s.TargetPath = '{exe}'
+$s.WorkingDirectory = '{HERE}'
+$s.Save()""")
+    if r.returncode:
+        print("自動起動を設定できませんでした: " + r.stderr.strip())
+        return
+    if not _running():
+        subprocess.Popen([exe], cwd=HERE, creationflags=0x00000008)   # DETACHED_PROCESS
+        time.sleep(3)
+    print("自動起動を設定しました。次から Windows にログインすると自動で動きます（画面には出ません）。")
+    status()
+
+
+def stop_agent():
+    if not _running():
+        print("印刷係は動いていませんでした")
+        return
+    subprocess.run(["taskkill", "/im", AGENT, "/f"], capture_output=True)
+    print("印刷係を止めました")
+
+
+def uninstall():
+    _ps(f"Remove-Item -ErrorAction SilentlyContinue {LNK_PATH}")
+    stop_agent()
+    print("自動起動をやめました")
+
+
+def status():
+    print("○ 印刷係は動いています" if _running() else "× 印刷係は止まっています（「自動起動を設定.bat」で起動できます）")
+    auto = _ps(f"Test-Path {LNK_PATH}").stdout.strip() == "True"
+    print("　自動起動: " + ("設定済み" if auto else "なし"))
+    print()
+    print("----- 最近の記録 -----")
+    if os.path.exists(LOG):
+        with open(LOG, encoding="utf-8-sig", errors="replace") as f:
+            for line in f.readlines()[-15:]:
+                print(line.rstrip())
+
+
 if __name__ == "__main__":
     try:
         if "--test" in sys.argv:
             test()
         elif "--qr" in sys.argv:
             qr_tag()
+        elif "--install" in sys.argv:
+            install()
+        elif "--uninstall" in sys.argv:
+            uninstall()
+        elif "--status" in sys.argv:
+            status()
+        elif "--stop" in sys.argv:
+            stop_agent()
         else:
             run()
     except Exception as e:      # exe をダブルクリックした時に、理由が読めないまま閉じないように
         log(f"止まりました: {e}")
-        input("Enter で閉じます")
+        if sys.stdin:
+            input("Enter で閉じます")
