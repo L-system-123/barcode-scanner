@@ -360,7 +360,7 @@ def uninstall():
 
 
 def status():
-    print("○ 印刷係は動いています" if _running() else "× 印刷係は止まっています（「自動起動を設定.bat」で起動できます）")
+    print("○ 印刷係は動いています" if _running() else "× 印刷係は止まっています（「1_最初に1回だけ押す」の bat で起動できます）")
     auto = _ps(f"Test-Path {LNK_PATH}").stdout.strip() == "True"
     print("　自動起動: " + ("設定済み" if auto else "なし"))
     print()
