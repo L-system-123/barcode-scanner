@@ -360,18 +360,18 @@ function commit(req, user) {
   try {
     var props = PropertiesService.getScriptProperties();
     var done = props.getProperty('done:' + clientId);
-    if (done) return { ok: true, pallet: done, count: rows.length, duplicate: true, codes: codeList(todayCodeMap(logSheet())) };
+    if (done) return { ok: true, pallet: done, count: rows.length, duplicate: true, done: doneList(todayCodeMap(logSheet())) };
 
     var sh = logSheet();
     var tb = todayBlock(sh), last = tb.last;
-    /* 連番の日付はパレット番号の先頭と同じ日なので、今日の行だけ見れば足りる */
+    /* 連番は今日・本人の分だけ数える（読んだ直近の行のうち、パレット番号が今日・本人で始まるもの） */
     var prefix = tb.prefix + user + '-';
     var seq = 0;
     tb.rows.forEach(function (r) {
       var p = String(r[0]);
       if (p.indexOf(prefix) === 0) seq = Math.max(seq, +p.slice(prefix.length) || 0);
     });
-    /* 今日すでに別のパレットで確定済みの箱は書かない（先に確定した方を正とする）。
+    /* 直近 DONE_DAYS 日に別のパレットで確定済みの箱は書かない（先に確定した方を正とする）。
        画面側でも読んだ時点で止めるが、2人が同時に同じ箱を読んだ場合はここでしか止められない */
     var already = codeMapOf(tb);
     var skipped = [];
@@ -381,7 +381,7 @@ function commit(req, user) {
       return true;
     });
     /* 全部確定済みだった時はパレット番号を振らない。再送されても同じ判定になるので done: も残さない */
-    if (!rows.length) return { ok: true, pallet: '', count: 0, skipped: skipped, codes: codeList(already) };
+    if (!rows.length) return { ok: true, pallet: '', count: 0, skipped: skipped, done: doneList(already) };
 
     var palletNo = prefix + ('000' + (seq + 1)).slice(-3);
 
@@ -399,56 +399,66 @@ function commit(req, user) {
     purgeDone(props);
     /* 画面の「スキャン済み」一覧を、別に取りに来させずこの返事で更新する（呼び出し回数を増やさないため） */
     out.forEach(function (r) { if (!already[r[2]]) already[r[2]] = { pallet: palletNo, user: user }; });
-    return { ok: true, pallet: palletNo, count: out.length, skipped: skipped, codes: codeList(already) };
+    return { ok: true, pallet: palletNo, count: out.length, skipped: skipped, done: doneList(already) };
   } finally {
     lock.releaseLock();
   }
 }
 
-/* ===== 今日のパレット =====
-   スキャン記録は確定順に下へ追記され、パレット番号の日付は確定した日なので、今日の分は必ず末尾にまとまっている。
-   今日の分が始まる行を覚えておき（キャッシュ）、そこから下だけ読む。覚えた行が合わなければ
-   （実績シート準備で行が消えた等）末尾から最大 TODAY_MAX_ROWS 行の A列 だけ読んで探し直す */
-var TODAY_MAX_ROWS = 5000;
+/* ===== 確定済みの箱（直近 DONE_DAYS 日）・今日のパレット =====
+   昨日パレタイズした箱をもう一度積むのも止めたいので、重複は今日だけでなく直近 DONE_DAYS 日で見る。
+   スキャン記録は確定順に下へ追記され、パレット番号の日付は確定した日なので、直近の分は必ず末尾にまとまっている。
+   その始まりの行を覚えておき（キャッシュ）、そこから下だけ読む。覚えた行が合わなければ
+   （実績シート準備で行が消えた等）末尾から最大 RECENT_MAX_ROWS 行の A列 だけ読んで探し直す */
+var DONE_DAYS = 7;
+var RECENT_MAX_ROWS = 40000;
 
 function todayBlock(sh) {
   var last = sh.getLastRow();
   var prefix = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd') + '-';
+  var cutoff = Utilities.formatDate(new Date(Date.now() - DONE_DAYS * 86400000), TZ, 'yyyyMMdd');
+  var isRecent = function (v) { v = String(v); return /^\d{8}-/.test(v) && v.slice(0, 8) >= cutoff; };
   if (last < 2) return { last: last, prefix: prefix, rows: [] };
-  var cache = CacheService.getScriptCache(), key = 'todayStart:' + prefix;
+  var cache = CacheService.getScriptCache(), key = 'recentStart:' + cutoff;
   var start = +cache.get(key) || 0;
   if (start >= 2 && start <= last) {
     var chk = sh.getRange(start - 1, 1, 2, 1).getValues();
-    var isToday = function (v) { return String(v).indexOf(prefix) === 0; };
-    if (!isToday(chk[1][0]) || (start > 2 && isToday(chk[0][0]))) start = 0;
+    if (!isRecent(chk[1][0]) || (start > 2 && isRecent(chk[0][0]))) start = 0;
   } else start = 0;
   if (!start) {
-    var n = Math.min(last - 1, TODAY_MAX_ROWS), top = last - n + 1;
+    var n = Math.min(last - 1, RECENT_MAX_ROWS), top = last - n + 1;
     var col = sh.getRange(top, 1, n, 1).getValues();
     start = last + 1;
-    for (var i = col.length - 1; i >= 0 && String(col[i][0]).indexOf(prefix) === 0; i--) start = top + i;
+    for (var i = col.length - 1; i >= 0 && isRecent(col[i][0]); i--) start = top + i;
     if (start <= last) cache.put(key, String(start), 21600);
   }
   return { last: last, prefix: prefix, rows: start <= last ? sh.getRange(start, 1, last - start + 1, LOG_HEADER.length).getValues() : [] };
 }
 
-/* 今日確定済みの箱: { 管理番号: { pallet, user } }。同じ番号が複数あれば先に確定した方 */
+/* 直近 DONE_DAYS 日に確定済みの箱: { 管理番号: { pallet, user } }。同じ番号が複数あれば先に確定した方 */
 function codeMapOf(tb) {
   var map = {};
   tb.rows.forEach(function (r) {
     var no = String(r[0]), code = String(r[2]);
-    if (no.indexOf(tb.prefix) === 0 && !map[code]) map[code] = { pallet: no, user: String(r[5]) };
+    if (no && !map[code]) map[code] = { pallet: no, user: String(r[5]) };
   });
   return map;
 }
 function todayCodeMap(sh) { return codeMapOf(todayBlock(sh)); }
 
-/* 画面側の「スキャン済み」判定用。全員分を [管理番号, パレット番号, ユーザー] の並びで返す */
+/* 画面側の「スキャン済み」判定用。全員分を返す。7日分は数千箱になるので、パレットごとにまとめ、
+   管理番号（12桁）はつなげて1つの文字列にする: [パレット番号, ユーザー, '管理番号管理番号…'] */
 function doneToday() {
-  return { ok: true, codes: codeList(todayCodeMap(logSheet())) };
+  return { ok: true, done: doneList(todayCodeMap(logSheet())) };
 }
-function codeList(map) {
-  return Object.keys(map).map(function (c) { return [c, map[c].pallet, map[c].user]; });
+function doneList(map) {
+  var by = {}, out = [];
+  Object.keys(map).forEach(function (c) {
+    var p = map[c], g = by[p.pallet];
+    if (!g) { g = by[p.pallet] = [p.pallet, p.user, '']; out.push(g); }
+    g[2] += c;
+  });
+  return out;
 }
 
 /* ===== 管理番号から探す =====
