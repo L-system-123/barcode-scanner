@@ -403,6 +403,14 @@
   .kb .kblist { width: 100%; }
   /* QR は四角いので、読み取り枠も四角に近づける（grabROI の ROI と合わせる） */
   .stage.qr .reticle { inset: 22% 14%; }
+  /* 看板回収チェックの間は緑にして、パレットの読み取りと見分ける（赤は警報・黄は注意なので使わない） */
+  body.kbmode { --accent: #0f8a6a; --paper: #dfeee8; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) body.kbmode { --accent: #2bb48e; --paper: #0b1814; }
+  }
+  :root[data-theme="dark"] body.kbmode { --accent: #2bb48e; --paper: #0b1814; }
+  body.kbmode .reticle { border: 3px solid var(--accent); }
+  body.kbmode #kbCard { border-color: var(--accent); border-left-width: 10px; }
   #prnState { font-size: 13px; color: var(--ink-2); }
   /* ---- 場所 ---- */
   .placebar { display: flex; align-items: center; gap: 8px; }
@@ -2023,9 +2031,9 @@ renderPlaces();
 
 /* ===== 看板回収チェック =====
    ドライバーが回収した看板（ラベルのQR。中身はパレット番号だけ）を次々に読む。
-   運送会社・箱数は手元に無いので、読むたびに読んだ看板の一覧を Apps Script に送って判定してもらう
+   運送会社・箱数は、始める時に Apps Script から全パレットの一覧（kanbanIndex）を受け取って手元で判定する
    （基準の運送会社＝最初に読んだ、記録にあって未回収の看板。名前で比べ、配送CDの違いは問わない）。
-   同じ看板の二度読みだけは手元で分かるので、その場で止める。
+   同じ看板の二度読みは、その場で止める。
    読んだ一覧は端末に残す（画面を閉じても続きから読める）。確定すると 看板回収 タブに書かれる */
 var KB_RE = /^\d{8}-[A-Za-z0-9]{1,10}-\d{3,}$/;
 var KB_MAX = 300;
@@ -2046,6 +2054,7 @@ function kbStat(msg, cls) { $('kbStat').textContent = msg; $('kbStat').className
 function setKbMode(on) {
   if (on && prnMode) { prnMode = false; showPrinter(); }
   kbMode = on;
+  document.body.classList.toggle('kbmode', on);
   FORMATS = on ? ['qr_code'] : ['codabar'];
   setQrFrame(on);
   $('kbCard').hidden = !on;
@@ -2059,11 +2068,12 @@ function setKbMode(on) {
   $('readout').style.borderLeftColor = 'var(--line)';
   if (running) stop();
   start();
-  if (on) { kbRender(); window.scrollTo(0, 0); if (kb.list.length) kbSync(); }
+  if (on) { kbRender(); window.scrollTo(0, 0); kbStartIdx(); }
 }
 /* プリンター登録に切り替える時用。カメラは呼んだ側で開き直す */
 function leaveKbMode() {
   kbMode = false;
+  document.body.classList.remove('kbmode');
   $('kbCard').hidden = true;
   $('palletCard').hidden = false;
   $('kbStart').textContent = kb.list.length ? '続きから' : '始める';
@@ -2103,7 +2113,68 @@ function readKanban(raw) {
   beep();
   $('band').textContent = '確認しています…';
   kbRender();
-  kbSync();
+  kbRefresh();
+}
+
+/* 始める時に全パレットの一覧を1回だけ受け取り、以後は端末の中で判定する（1枚ごとの問い合わせは3秒かかる）。
+   一覧に無い番号を読んだら、その後に確定したパレットかもしれないので1回だけ取り直す。
+   一覧を受け取れなかった時は、これまでどおり1枚ごとに問い合わせる。確定（collect）はいつも Apps Script が判定し直す */
+var kbIdx = null, kbIdxP = null, kbAsked = {};
+function kbFetchIdx() {
+  if (kbIdxP) return kbIdxP;
+  kbIdxP = api({ action: 'kanbanIndex', token: lsGet(KEY.token) }).then(function (r) {
+    if (r.error === 'auth') { lsSet(KEY.token, null); showLogin('ログインの期限が切れました'); }
+    if (!r.ok) throw new Error(r.error);
+    var m = {};
+    r.pallets.forEach(function (x) { m[x[0]] = { carrier: x[1], cd: x[2], user: x[3], count: x[4], at: x[5], by: x[6] }; });
+    kbIdx = m;
+  }).then(function () { kbIdxP = null; }, function (e) { kbIdxP = null; throw e; });
+  return kbIdxP;
+}
+function kbStartIdx() {
+  kbIdx = null; kbAsked = {};
+  kbStat('看板の一覧を受け取っています…', '');
+  kbFetchIdx().then(function () {
+    if (!kbMode) return;
+    kbStat('', '');
+    kbRefresh();
+  }, function () {
+    if (!kbMode) return;
+    kbStat('一覧を受け取れませんでした。1枚ずつ確認します（少し時間がかかります）', 'bad');
+    kbRefresh();
+  });
+}
+function kbRefresh() {
+  if (!kb.list.length) { kbRender(); return; }
+  if (!kbIdx) { if (!kbIdxP) kbSync(); return; }   // 受け取り中なら、届いてからここに戻る
+  var ask = kb.list.filter(function (no) { return !kbIdx[no] && !kbAsked[no]; });
+  ask.forEach(function (no) { kbAsked[no] = 1; });
+  kbApply(kbLocal());
+  if (ask.length) kbFetchIdx().catch(function () {}).then(function () {
+    ask.forEach(function (no) { kbAsked[no] = 2; });
+    if (kbMode) kbRefresh();
+  });
+}
+/* Apps Script の judgeKanban・kanban と同じ判定。取り直し中の番号は「確認中…」のまま */
+function kbLocal() {
+  var base = '', seen = {}, items = [], left = [];
+  kb.list.forEach(function (no) {
+    if (seen[no] || kbAsked[no] === 1) return;
+    seen[no] = true;
+    var p = kbIdx[no];
+    if (!p) { items.push({ pallet: no, state: 'missing' }); return; }
+    var o = { pallet: no, carrier: p.carrier, cd: p.cd, user: p.user, count: p.count };
+    if (p.at) { o.state = 'collected'; o.at = p.at > 1 ? p.at : null; o.by = p.by; }
+    else if (!base) { base = p.carrier; o.state = 'ok'; }
+    else o.state = p.carrier === base ? 'ok' : 'mixed';
+    items.push(o);
+  });
+  if (base) Object.keys(kbIdx).forEach(function (no) {
+    var p = kbIdx[no];
+    if (p.carrier === base && !p.at && kb.list.indexOf(no) < 0) left.push({ pallet: no, count: p.count, user: p.user, cd: p.cd });
+  });
+  left.sort(function (a, b) { return a.pallet < b.pallet ? -1 : a.pallet > b.pallet ? 1 : 0; });
+  return { base: base, items: items, left: left };
 }
 
 /* 読んだ一覧をまるごと送って判定し直してもらう。送っている間に読んだ分は、返事が来てからもう一度 */
@@ -2211,11 +2282,11 @@ function kbRender() {
     b.className = 'rm'; b.textContent = '×'; b.setAttribute('aria-label', no + ' を外す');
     b.onclick = function () {
       kb.list = kb.list.filter(function (x) { return x !== no; });
-      delete kb.info[no]; delete kb.alerted[no];
+      delete kb.info[no]; delete kb.alerted[no]; delete kbAsked[no];
       if (no === kbLastRaw) kbLastRaw = '';
       kbSave();
       kbRender();
-      if (kb.list.length) kbSync(); else { kb = kbNew(); kbSave(); kbRender(); }
+      if (kb.list.length) kbRefresh(); else { kb = kbNew(); kbSave(); kbRender(); }
     };
     tr.insertCell().appendChild(b);
   });
@@ -2256,6 +2327,10 @@ $('kbCommit').onclick = async function () {
     }
     /* 再送で、前に書けていた分は already に入ってくる */
     var n = r.pallets + (r.already || 0), b = r.boxes + (r.alreadyBoxes || 0);
+    if (kbIdx) mine.list.forEach(function (no) {
+      var it = mine.info[no];
+      if (kbIdx[no] && it && it.state === 'ok') { kbIdx[no].at = Date.now(); kbIdx[no].by = lsGet(KEY.user) || ''; }
+    });
     kb = kbNew();
     kbSave();
     beep();

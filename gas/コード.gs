@@ -101,6 +101,7 @@ function doPost(e) {
       case 'setPrinter': return reply(withUser(req, function (user) { return setPrinter(req, user); }));
       case 'reprint':    return reply(withUser(req, function (user) { return reprint(req, user); }));
       case 'kanban':     return reply(withUser(req, function () { return kanban(req); }));
+      case 'kanbanIndex': return reply(withUser(req, function () { return kanbanIndex(); }));
       case 'collect':    return reply(withUser(req, function (user) { return collect(req, user); }));
       case 'printQueue': return reply(withPrintKey(req, printQueue));
       case 'printed':    return reply(withPrintKey(req, printed));
@@ -680,6 +681,17 @@ function kanban(req) {
   }
   left.sort(function (a, b) { return a.pallet < b.pallet ? -1 : a.pallet > b.pallet ? 1 : 0; });
   return { ok: true, base: j.base, items: j.items, left: left };
+}
+
+/* 看板回収チェックを始める時に1回だけ渡す、全パレットの一覧。画面はこれで読んだ瞬間に判定する
+   （1枚ごとに問い合わせると3秒かかるため）。確定（collect）はこれまでどおりここで判定し直す。
+   [パレット番号, 運送会社, 配送CD, ユーザーID, 箱数, 回収日時(ms・未回収は0), 回収した人] */
+function kanbanIndex() {
+  var pal = palletIndex(), got = collectedIndex(collectSheet());
+  return { ok: true, pallets: Object.keys(pal).map(function (no) {
+    var p = pal[no], g = got[no];
+    return [no, p.carrier, p.cd, p.user, p.count, g ? (g.at || 1) : 0, g ? g.user : ''];
+  }) };
 }
 
 /* 回収を確定する。運送会社が混ざっていたら書かない。回収済み・記録に無い看板は飛ばす。
