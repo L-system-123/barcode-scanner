@@ -2102,6 +2102,7 @@ function readKanban(raw) {
   $('code').textContent = no.slice(0, 32);
   $('band').style.color = '';
   if (!KB_RE.test(no)) { $('band').textContent = '看板のQRではありません'; return; }
+  if (kbIdx && !kbIdx[no] && kbUp[no.toUpperCase()]) no = kbUp[no.toUpperCase()];
   if (kb.list.indexOf(no) >= 0) {
     $('band').textContent = '読み取り済みの看板です（数には足していません）';
     raiseAlert('warn', '同じ看板', no + ' はもう読んでいます。数には足していません');
@@ -2119,7 +2120,7 @@ function readKanban(raw) {
 /* 始める時に全パレットの一覧を1回だけ受け取り、以後は端末の中で判定する（1枚ごとの問い合わせは3秒かかる）。
    一覧に無い番号を読んだら、その後に確定したパレットかもしれないので1回だけ取り直す。
    一覧を受け取れなかった時は、これまでどおり1枚ごとに問い合わせる。確定（collect）はいつも Apps Script が判定し直す */
-var kbIdx = null, kbIdxP = null, kbAsked = {};
+var kbIdx = null, kbIdxP = null, kbAsked = {}, kbUp = {};
 function kbFetchIdx() {
   if (kbIdxP) return kbIdxP;
   kbIdxP = api({ action: 'kanbanIndex', token: lsGet(KEY.token) }).then(function (r) {
@@ -2128,6 +2129,8 @@ function kbFetchIdx() {
     var m = {};
     r.pallets.forEach(function (x) { m[x[0]] = { carrier: x[1], cd: x[2], user: x[3], count: x[4], at: x[5], by: x[6] }; });
     kbIdx = m;
+    kbUp = {};
+    Object.keys(m).forEach(function (no) { kbUp[no.toUpperCase()] = no; });
   }).then(function () { kbIdxP = null; }, function (e) { kbIdxP = null; throw e; });
   return kbIdxP;
 }
@@ -2147,6 +2150,7 @@ function kbStartIdx() {
 function kbRefresh() {
   if (!kb.list.length) { kbRender(); return; }
   if (!kbIdx) { if (!kbIdxP) kbSync(); return; }   // 受け取り中なら、届いてからここに戻る
+  kbCanon();
   var ask = kb.list.filter(function (no) { return !kbIdx[no] && !kbAsked[no]; });
   ask.forEach(function (no) { kbAsked[no] = 1; });
   kbApply(kbLocal());
@@ -2154,6 +2158,17 @@ function kbRefresh() {
     ask.forEach(function (no) { kbAsked[no] = 2; });
     if (kbMode) kbRefresh();
   });
+}
+/* ラベルのQRは英数字モードなので、読むとユーザーIDが大文字になる（Lennon → LENNON）。
+   ユーザーIDは大文字小文字を区別しないので、一覧の表記に置き換える（Apps Script の canonPallets と同じ） */
+function kbCanon() {
+  var changed = false, out = [];
+  kb.list.forEach(function (no) {
+    var c = kbIdx[no] ? no : (kbUp[no.toUpperCase()] || no);
+    if (c !== no) { changed = true; delete kb.info[no]; delete kb.alerted[no]; delete kbAsked[no]; }
+    if (out.indexOf(c) < 0) out.push(c); else changed = true;
+  });
+  if (changed) { kb.list = out; kbSave(); }
 }
 /* Apps Script の judgeKanban・kanban と同じ判定。取り直し中の番号は「確認中…」のまま */
 function kbLocal() {
@@ -2283,7 +2298,7 @@ function kbRender() {
     b.onclick = function () {
       kb.list = kb.list.filter(function (x) { return x !== no; });
       delete kb.info[no]; delete kb.alerted[no]; delete kbAsked[no];
-      if (no === kbLastRaw) kbLastRaw = '';
+      if (no.toUpperCase() === kbLastRaw.toUpperCase()) kbLastRaw = '';
       kbSave();
       kbRender();
       if (kb.list.length) kbRefresh(); else { kb = kbNew(); kbSave(); kbRender(); }

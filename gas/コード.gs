@@ -658,6 +658,14 @@ function judgeKanban(list, pal, got) {
   return { base: base, items: items };
 }
 
+/* ラベルのQRは英数字モードで刷っているので、読むとユーザーIDが大文字になる（Lennon → LENNON）。
+   ユーザーIDは大文字小文字を区別しないので、記録の表記に戻してから判定する */
+function canonPallets(list, pal) {
+  var up = {};
+  Object.keys(pal).forEach(function (no) { up[no.toUpperCase()] = no; });
+  return list.map(function (no) { return pal[no] ? no : (up[no.toUpperCase()] || no); });
+}
+
 function kanbanList(req) {
   var list = Array.isArray(req.pallets) ? req.pallets.map(String) : null;
   if (!list || list.length > KANBAN_MAX) return null;
@@ -670,6 +678,7 @@ function kanban(req) {
   var list = kanbanList(req);
   if (!list) return { ok: false, error: 'bad_pallet' };
   var pal = palletIndex(), got = collectedIndex(collectSheet());
+  list = canonPallets(list, pal);
   var j = judgeKanban(list, pal, got);
   var mine = {}, left = [];
   list.forEach(function (no) { mine[no] = true; });
@@ -703,7 +712,8 @@ function collect(req, user) {
   lock.waitLock(20000);
   try {
     var sh = collectSheet();
-    var j = judgeKanban(list, palletIndex(), collectedIndex(sh));
+    var pal = palletIndex();
+    var j = judgeKanban(canonPallets(list, pal), pal, collectedIndex(sh));
     if (j.items.some(function (x) { return x.state === 'mixed'; })) return { ok: false, error: 'mixed', base: j.base, items: j.items };
     var take = j.items.filter(function (x) { return x.state === 'ok'; });
     var now = new Date();
