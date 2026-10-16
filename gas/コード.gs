@@ -250,6 +250,7 @@ function login(req) {
 
 /* トークンが有効で、かつそのユーザーがシート上でまだ有効な時だけ通す。
    チェックを外した瞬間から、ログイン中の端末も止まる */
+var REQ_USER = null;   // withUser で読んだ本人の行。確定の印刷待ちで ユーザー タブを読み直さないため
 function withUser(req, fn) {
   var raw = PropertiesService.getScriptProperties().getProperty('tok:' + String(req.token || ''));
   if (!raw) return { ok: false, error: 'auth' };
@@ -257,6 +258,7 @@ function withUser(req, fn) {
   if (t.exp < Date.now()) return { ok: false, error: 'auth' };
   var u = findUser(usersSheet(), normUser(t.user));
   if (!u || !isOn(u.values[U_ON - 1])) return { ok: false, error: 'auth' };
+  REQ_USER = u;
   return fn(t.user);
 }
 
@@ -361,18 +363,17 @@ function commit(req, user) {
     if (done) return { ok: true, pallet: done, count: rows.length, duplicate: true, codes: codeList(todayCodeMap(logSheet())) };
 
     var sh = logSheet();
-    var prefix = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd') + '-' + user + '-';
+    var tb = todayBlock(sh), last = tb.last;
+    /* 連番の日付はパレット番号の先頭と同じ日なので、今日の行だけ見れば足りる */
+    var prefix = tb.prefix + user + '-';
     var seq = 0;
-    var last = sh.getLastRow();
-    if (last >= 2) {
-      sh.getRange(2, 1, last - 1, 1).getValues().forEach(function (r) {
-        var p = String(r[0]);
-        if (p.indexOf(prefix) === 0) seq = Math.max(seq, +p.slice(prefix.length) || 0);
-      });
-    }
+    tb.rows.forEach(function (r) {
+      var p = String(r[0]);
+      if (p.indexOf(prefix) === 0) seq = Math.max(seq, +p.slice(prefix.length) || 0);
+    });
     /* 今日すでに別のパレットで確定済みの箱は書かない（先に確定した方を正とする）。
        画面側でも読んだ時点で止めるが、2人が同時に同じ箱を読んだ場合はここでしか止められない */
-    var already = todayCodeMap(sh);
+    var already = codeMapOf(tb);
     var skipped = [];
     rows = rows.filter(function (r) {
       var hit = already[r[0]];
@@ -390,13 +391,14 @@ function commit(req, user) {
     sh.getRange(last + 1, 1, out.length, LOG_HEADER.length).setValues(out);
     SpreadsheetApp.flush();
 
+    /* 印刷係が少しでも早く拾えるよう、書けたらすぐ印刷待ちに積む。
+       記録は書けているので、印刷待ちに積めなくても確定は成功として返す（再送で二重に書かせない） */
+    try { queuePrint(props, { pallet: palletNo, carrier: carrier.name, cd: carrier.cd || '', count: out.length, at: Date.now(), user: user }); }
+    catch (err) { console.error(err); }
     props.setProperty('done:' + clientId, palletNo);
     purgeDone(props);
     /* 画面の「スキャン済み」一覧を、別に取りに来させずこの返事で更新する（呼び出し回数を増やさないため） */
     out.forEach(function (r) { if (!already[r[2]]) already[r[2]] = { pallet: palletNo, user: user }; });
-    /* 記録は書けているので、印刷待ちに積めなくても確定は成功として返す（再送で二重に書かせない） */
-    try { queuePrint(props, { pallet: palletNo, carrier: carrier.name, cd: carrier.cd || '', count: out.length, at: Date.now(), user: user }); }
-    catch (err) { console.error(err); }
     return { ok: true, pallet: palletNo, count: out.length, skipped: skipped, codes: codeList(already) };
   } finally {
     lock.releaseLock();
@@ -404,22 +406,42 @@ function commit(req, user) {
 }
 
 /* ===== 今日のパレット =====
-   スキャン記録は確定順に下へ追記されるので、今日の分は必ず末尾にまとまっている。
-   シート全体は読まず、末尾から最大 TODAY_MAX_ROWS 行だけ見る */
+   スキャン記録は確定順に下へ追記され、パレット番号の日付は確定した日なので、今日の分は必ず末尾にまとまっている。
+   今日の分が始まる行を覚えておき（キャッシュ）、そこから下だけ読む。覚えた行が合わなければ
+   （実績シート準備で行が消えた等）末尾から最大 TODAY_MAX_ROWS 行の A列 だけ読んで探し直す */
 var TODAY_MAX_ROWS = 5000;
 
-/* 今日確定済みの箱: { 管理番号: { pallet, user } }。同じ番号が複数あれば先に確定した方 */
-function todayCodeMap(sh) {
-  var last = sh.getLastRow(), map = {};
-  if (last < 2) return map;
-  var n = Math.min(last - 1, TODAY_MAX_ROWS);
+function todayBlock(sh) {
+  var last = sh.getLastRow();
   var prefix = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd') + '-';
-  sh.getRange(last - n + 1, 1, n, LOG_HEADER.length).getValues().forEach(function (r) {
+  if (last < 2) return { last: last, prefix: prefix, rows: [] };
+  var cache = CacheService.getScriptCache(), key = 'todayStart:' + prefix;
+  var start = +cache.get(key) || 0;
+  if (start >= 2 && start <= last) {
+    var chk = sh.getRange(start - 1, 1, 2, 1).getValues();
+    var isToday = function (v) { return String(v).indexOf(prefix) === 0; };
+    if (!isToday(chk[1][0]) || (start > 2 && isToday(chk[0][0]))) start = 0;
+  } else start = 0;
+  if (!start) {
+    var n = Math.min(last - 1, TODAY_MAX_ROWS), top = last - n + 1;
+    var col = sh.getRange(top, 1, n, 1).getValues();
+    start = last + 1;
+    for (var i = col.length - 1; i >= 0 && String(col[i][0]).indexOf(prefix) === 0; i--) start = top + i;
+    if (start <= last) cache.put(key, String(start), 21600);
+  }
+  return { last: last, prefix: prefix, rows: start <= last ? sh.getRange(start, 1, last - start + 1, LOG_HEADER.length).getValues() : [] };
+}
+
+/* 今日確定済みの箱: { 管理番号: { pallet, user } }。同じ番号が複数あれば先に確定した方 */
+function codeMapOf(tb) {
+  var map = {};
+  tb.rows.forEach(function (r) {
     var no = String(r[0]), code = String(r[2]);
-    if (no.indexOf(prefix) === 0 && !map[code]) map[code] = { pallet: no, user: String(r[5]) };
+    if (no.indexOf(tb.prefix) === 0 && !map[code]) map[code] = { pallet: no, user: String(r[5]) };
   });
   return map;
 }
+function todayCodeMap(sh) { return codeMapOf(todayBlock(sh)); }
 
 /* 画面側の「スキャン済み」判定用。全員分を [管理番号, パレット番号, ユーザー] の並びで返す */
 function doneToday() {
@@ -448,13 +470,9 @@ function find(req) {
 }
 
 function today(req, user) {
-  var sh = logSheet();
-  var last = sh.getLastRow();
-  if (last < 2) return { ok: true, pallets: [] };
-  var n = Math.min(last - 1, TODAY_MAX_ROWS);
-  var vals = sh.getRange(last - n + 1, 1, n, LOG_HEADER.length).getValues();
-
-  var prefix = Utilities.formatDate(new Date(), TZ, 'yyyyMMdd') + '-';
+  var tb = todayBlock(logSheet());
+  if (!tb.rows.length) return { ok: true, pallets: [] };
+  var vals = tb.rows, prefix = tb.prefix;
   var me = normUser(user);
   var byNo = {}, order = [];
   vals.forEach(function (r) {
@@ -487,7 +505,7 @@ function purgeDone(props) {
 /* job.printer を先に決めてあればそれを使う（再発行は押した人のプリンター）。
    プリンターを登録していない人の分は印刷しない（出なかったら登録して再発行する運用） */
 function queuePrint(props, job) {
-  var u = findUser(usersSheet(), normUser(job.user));
+  var u = REQ_USER && normUser(REQ_USER.values[U_ID - 1]) === normUser(job.user) ? REQ_USER : findUser(usersSheet(), normUser(job.user));
   job.name = u ? String(u.values[U_NAME - 1] || '').trim() : '';
   if (job.printer === undefined) job.printer = u ? String(u.values[U_PRINTER - 1] || '').trim() : '';
   if (!job.printer) return;
